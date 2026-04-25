@@ -933,7 +933,19 @@ def hourly_gran_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory) 
     )
     info = migrate_and_deploy(spec, pinot, out_dir)
 
-    ingest_records_into_pinot(pinot, DS, HOURLY_GRAN_RECORDS, out_dir)
+    # Pinot schema has metric columns reading_count / reading_sum (not 'reading'),
+    # so map source field 'reading' to those names before ingesting.
+    pinot_records = [
+        {
+            "timestamp": r["timestamp"],
+            "sensor": r["sensor"],
+            "region": r["region"],
+            "reading_count": 1,
+            "reading_sum": r["reading"],
+        }
+        for r in HOURLY_GRAN_RECORDS
+    ]
+    ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
     pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
@@ -1049,7 +1061,21 @@ def float_metrics_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory
     )
     info = migrate_and_deploy(spec, pinot, out_dir)
 
-    ingest_records_into_pinot(pinot, DS, FLOAT_METRICS_RECORDS, out_dir)
+    # Pinot schema metric columns: event_count, score_sum, score_min, score_max,
+    # weight_sum (not raw 'score' / 'weight'). Map before ingesting.
+    pinot_records = [
+        {
+            "timestamp": r["timestamp"],
+            "category": r["category"],
+            "event_count": 1,
+            "score_sum": r["score"],
+            "score_min": r["score"],
+            "score_max": r["score"],
+            "weight_sum": r["weight"],
+        }
+        for r in FLOAT_METRICS_RECORDS
+    ]
+    ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
     pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
@@ -1098,7 +1124,19 @@ def hash_partitioned_state(druid: DruidClient, pinot: PinotClient, tmp_path_fact
     }
     info = migrate_and_deploy(spec, pinot, out_dir)
 
-    ingest_records_into_pinot(pinot, DS, HASH_PARTITIONED_RECORDS, out_dir)
+    # Pinot schema metric columns: order_count, total_amount (not 'amount').
+    pinot_records = [
+        {
+            "timestamp": r["timestamp"],
+            "customer_id": r["customer_id"],
+            "product_id": r["product_id"],
+            "status": r["status"],
+            "order_count": 1,
+            "total_amount": r["amount"],
+        }
+        for r in HASH_PARTITIONED_RECORDS
+    ]
+    ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
     pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
