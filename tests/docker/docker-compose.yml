@@ -191,7 +191,7 @@ services:
 
   # ── Pinot Controller ──────────────────────────────────────────────────────
   pinot-controller:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: migtest-pinot-controller
     depends_on:
       zookeeper:
@@ -220,7 +220,7 @@ services:
 
   # ── Pinot Broker ──────────────────────────────────────────────────────────
   pinot-broker:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: migtest-pinot-broker
     depends_on:
       pinot-controller:
@@ -245,7 +245,7 @@ services:
 
   # ── Pinot Server ──────────────────────────────────────────────────────────
   pinot-server:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: migtest-pinot-server
     depends_on:
       pinot-controller:

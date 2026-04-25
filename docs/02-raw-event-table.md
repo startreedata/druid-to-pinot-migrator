@@ -226,8 +226,8 @@ For a raw event table with no rollup, row counts and aggregation results should 
 ## Common Issues
 
 **Problem:** Schema creation returns 400 — invalid dateTimeFieldSpec format  
-**Cause:** Older Pinot versions use `EPOCH|MILLISECONDS|1` format strings; 1.4.0+ requires `1:MILLISECONDS:EPOCH`.  
-**Fix:** The tool generates the correct 1.4.0+ format. If targeting an older cluster, update the format field manually.
+**Cause:** Older Pinot versions use `EPOCH|MILLISECONDS|1` format strings; modern Pinot (1.x) requires `1:MILLISECONDS:EPOCH`.  
+**Fix:** The tool generates the modern format. If targeting an older cluster (≤ 0.11), update the format field manually.
 
 **Problem:** Ingestion fails — field not found in schema  
 **Cause:** Your JSON records may have fields not declared in `dimensionsSpec`. Druid is permissive by default.  

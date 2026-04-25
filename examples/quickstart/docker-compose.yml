@@ -191,7 +191,7 @@ services:
       start_period: 60s
 
   pinot-controller:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: quickstart-pinot-controller
     depends_on:
       zookeeper:
@@ -219,7 +219,7 @@ services:
       start_period: 60s
 
   pinot-broker:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: quickstart-pinot-broker
     depends_on:
       pinot-controller:
@@ -243,7 +243,7 @@ services:
       start_period: 60s
 
   pinot-server:
-    image: apachepinot/pinot:1.4.0
+    image: apachepinot/pinot:1.5.0
     container_name: quickstart-pinot-server
     depends_on:
       pinot-controller:

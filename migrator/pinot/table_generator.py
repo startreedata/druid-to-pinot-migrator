@@ -58,7 +58,7 @@ class PinotTableGenerator:
             "stream.kafka.broker.list": broker_list,
             "stream.kafka.consumer.type": "lowlevel",
             "stream.kafka.consumer.factory.class.name": (
-                "org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory"
+                "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory"
             ),
             "stream.kafka.decoder.class.name": (
                 "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"

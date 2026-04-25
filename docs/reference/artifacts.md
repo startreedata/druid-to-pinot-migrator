@@ -258,7 +258,7 @@ Kafka consumer configuration nested inside `tableIndexConfig`.
 | `stream.kafka.topic.name` | `ioConfig.topic` | datasource name |
 | `stream.kafka.broker.list` | `ioConfig.consumerProperties["bootstrap.servers"]` | `"localhost:9092"` |
 | `stream.kafka.consumer.type` | — | `"lowlevel"` |
-| `stream.kafka.consumer.factory.class.name` | — | `"org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory"` |
+| `stream.kafka.consumer.factory.class.name` | — | `"org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory"` |
 | `stream.kafka.decoder.class.name` | — | `"org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"` |
 | `realtime.segment.flush.threshold.rows` | — | `"1000000"` |
 | `realtime.segment.flush.threshold.time` | — | `"1h"` |
@@ -291,7 +291,7 @@ Kafka consumer configuration nested inside `tableIndexConfig`.
       "stream.kafka.topic.name": "events",
       "stream.kafka.broker.list": "kafka-broker:9092",
       "stream.kafka.consumer.type": "lowlevel",
-      "stream.kafka.consumer.factory.class.name": "org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory",
+      "stream.kafka.consumer.factory.class.name": "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory",
       "stream.kafka.decoder.class.name": "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder",
       "realtime.segment.flush.threshold.rows": "1000000",
       "realtime.segment.flush.threshold.time": "1h"
@@ -416,7 +416,7 @@ of the `tableIndexConfig.streamConfigs` block from `table-realtime.json`.
   "stream.kafka.topic.name": "events",
   "stream.kafka.broker.list": "kafka-broker:9092",
   "stream.kafka.consumer.type": "lowlevel",
-  "stream.kafka.consumer.factory.class.name": "org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory",
+  "stream.kafka.consumer.factory.class.name": "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory",
   "stream.kafka.decoder.class.name": "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder",
   "realtime.segment.flush.threshold.rows": "1000000",
   "realtime.segment.flush.threshold.time": "1h"

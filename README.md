@@ -21,14 +21,14 @@ The tool operates at the ingestion-spec JSON layer and does not connect to runni
 | Component | Version | Notes |
 |-----------|---------|-------|
 | Apache Druid (source) | **31.0.0** | Live integration suite (`tests/docker/`) and `examples/quickstart/` |
-| Apache Pinot (target) | **1.4.0** | Live integration suite (`tests/docker/`) and `examples/quickstart/` |
+| Apache Pinot (target) | **1.5.0** | Live integration suite (`tests/docker/`) and `examples/quickstart/` |
 | Python | 3.11+ | Runtime requirement |
 
 ### Version compatibility matrix
 
 The cells indicate the expected outcome of translating a Druid spec from the row version into Pinot artifacts deployable on the column version.
 
-|                       | Pinot 1.4.x   | Pinot 1.0.x – 1.3.x | Pinot 0.12.x        | Pinot ≤ 0.11.x      |
+|                       | Pinot 1.5.x   | Pinot 1.0.x – 1.4.x | Pinot 0.12.x        | Pinot ≤ 0.11.x      |
 |-----------------------|---------------|---------------------|---------------------|---------------------|
 | **Druid 30.x – 31.x** | ✅ Tested     | ✅ Supported        | ⚠️ Mostly works     | ❌ Not supported     |
 | **Druid 24.x – 29.x** | ✅ Supported  | ✅ Supported        | ⚠️ Mostly works     | ❌ Not supported     |
@@ -46,6 +46,8 @@ Legend:
 **Druid ≥ 0.20** — the tool models the modern ingestion API (`index_parallel`, `kafka`, `kinesis` ioConfigs) and both the legacy top-level `dataSchema` and the current nested `spec.dataSchema` layouts. Pre-0.20 specs (legacy `index` task, deprecated firehoses) are not modeled and will fail to parse cleanly.
 
 **Pinot ≥ 0.12** — generated `schema.json` uses the compact `dateTimeFieldSpec` format (`"1:MILLISECONDS:EPOCH"` / `"1:MILLISECONDS:SIMPLE_DATE_FORMAT:..."`) and `table-realtime.json` uses the modern `tableIndexConfig.streamConfigs` block. Earlier Pinot versions (≤ 0.11.x) used split `format` / `granularity` fields and a different stream-config shape, and will reject the generated artifacts.
+
+**Note on Pinot 1.5** — Pinot 1.5.0 removed the `pinot-kafka-2.0` plugin in favour of `pinot-kafka-3.0` (Kafka 3/4 clients). Generated REALTIME tables emit the `kafka30` consumer factory class name (`org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory`), which is shipped by both Pinot 1.4 and 1.5 with the same FQCN, so the same generated artifact deploys cleanly on either release. (Pinot also keeps a backward-compat alias for the old `kafka20` class name, but new artifacts use the canonical name.)
 
 ### Spec-feature support snapshot
 

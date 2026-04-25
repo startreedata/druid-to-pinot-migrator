@@ -126,7 +126,7 @@ Generated 8 files in ./output/clickstream/
       "stream.kafka.broker.list": "kafka-broker-1:9092,kafka-broker-2:9092",
       "stream.kafka.consumer.type": "lowlevel",
       "stream.kafka.consumer.factory.class.name":
-        "org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory",
+        "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory",
       "stream.kafka.decoder.class.name":
         "org.apache.pinot.plugin.stream.kafka.KafkaJSONMessageDecoder",
       "realtime.segment.flush.threshold.rows": "1000000",
