@@ -1,0 +1,42 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "user_events",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "posix"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["user_id", "event_category", "platform"]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "event_count"},
+        {"type": "doubleSum", "name": "duration_sum", "fieldName": "duration_ms"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false
+      },
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "event_category",
+            "expression": "concat(event_type, '_', platform)"
+          }
+        ]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/data/events"
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

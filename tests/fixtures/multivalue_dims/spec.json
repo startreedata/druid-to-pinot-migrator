@@ -1,0 +1,49 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "content_tags",
+      "timestampSpec": {
+        "column": "published_at",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "content_id",
+          "author",
+          {
+            "type": "string",
+            "name": "tags",
+            "multiValueHandling": "SORTED_ARRAY",
+            "createBitmapIndex": true
+          },
+          {
+            "type": "string",
+            "name": "categories",
+            "multiValueHandling": "SORTED_SET"
+          },
+          "language"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "view_count"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/data/content",
+        "filter": "*.json"
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

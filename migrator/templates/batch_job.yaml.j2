@@ -1,0 +1,20 @@
+jobType: SegmentCreationAndTarPush
+inputDirURI: {{ input_dir }}
+outputDirURI: /tmp/pinot-output/{{ datasource_name }}
+overwriteOutput: true
+
+pinotFSSpecs:
+  - scheme: file
+    className: org.apache.pinot.spi.filesystem.LocalPinotFS
+
+recordReaderSpec:
+  dataFormat: json
+  className: org.apache.pinot.plugin.inputformat.json.JSONRecordReader
+
+tableSpec:
+  tableName: {{ datasource_name }}
+  schemaURI: http://localhost:9000/schemas/{{ datasource_name }}
+  tableConfigURI: http://localhost:9000/tables/{{ datasource_name }}
+
+pinotClusterSpecs:
+  - controllerURI: http://localhost:9000

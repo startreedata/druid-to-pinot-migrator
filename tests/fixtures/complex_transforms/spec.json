@@ -1,0 +1,68 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "enriched_clicks",
+      "timestampSpec": {
+        "column": "click_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "session_id",
+          "user_id",
+          "device_type",
+          "normalized_url",
+          "campaign_label",
+          "risk_tier"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "click_count"},
+        {"type": "doubleSum", "name": "bid_sum", "fieldName": "bid_price"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "NONE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      },
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "normalized_url",
+            "expression": "regexp_replace(url, '\\\\?.*$', '')"
+          },
+          {
+            "type": "expression",
+            "name": "campaign_label",
+            "expression": "if(campaign_id != null, concat(campaign_id, '_', channel), 'organic')"
+          },
+          {
+            "type": "expression",
+            "name": "risk_tier",
+            "expression": "case(fraud_score < 0.3, 'low', fraud_score < 0.7, 'medium', 'high')"
+          }
+        ],
+        "filter": {
+          "type": "not",
+          "field": {
+            "type": "selector",
+            "dimension": "bot_flag",
+            "value": "true"
+          }
+        }
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": ["s3://clicks-bucket/raw/"]
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

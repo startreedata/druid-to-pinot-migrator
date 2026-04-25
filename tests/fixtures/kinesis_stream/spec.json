@@ -1,0 +1,43 @@
+{
+  "type": "kinesis",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "payment_events",
+      "timestampSpec": {
+        "column": "event_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "payment_id",
+          "user_id",
+          "merchant_id",
+          "payment_method",
+          "currency",
+          "status"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "tx_count"},
+        {"type": "doubleSum", "name": "amount_usd", "fieldName": "amount_usd"},
+        {"type": "longSum",   "name": "failure_count", "fieldName": "is_failure"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "kinesis",
+      "stream": "payment-events-prod",
+      "inputFormat": {"type": "json"},
+      "endpoint": "kinesis.us-east-1.amazonaws.com",
+      "taskCount": 2,
+      "replicas": 1,
+      "taskDuration": "PT1H",
+      "useEarliestSequenceNumber": false
+    }
+  }
+}

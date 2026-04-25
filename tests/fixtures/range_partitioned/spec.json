@@ -1,0 +1,49 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "sensor_readings",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "sensor_id",
+          "location",
+          {"type": "double", "name": "temperature"},
+          {"type": "double", "name": "humidity"}
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "reading_count"},
+        {"type": "doubleMin", "name": "temp_min", "fieldName": "temperature"},
+        {"type": "doubleMax", "name": "temp_max", "fieldName": "temperature"},
+        {"type": "doubleSum", "name": "temp_sum", "fieldName": "temperature"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": ["s3://iot-bucket/sensor_readings/"]
+      },
+      "inputFormat": {"type": "json"}
+    },
+    "tuningConfig": {
+      "type": "index_parallel",
+      "partitionsSpec": {
+        "type": "range",
+        "partitionDimensions": ["sensor_id"],
+        "targetRowsPerSegment": 5000000
+      }
+    }
+  }
+}

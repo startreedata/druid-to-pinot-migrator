@@ -1,0 +1,36 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "ad_metrics",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["campaign_id", "ad_group_id", "country"]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "impressions"},
+        {"type": "longSum", "name": "clicks", "fieldName": "click_count"},
+        {"type": "doubleSum", "name": "revenue", "fieldName": "revenue_usd"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "HOUR",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "uris": ["s3://data-bucket/ad_metrics/"]
+      },
+      "inputFormat": {
+        "type": "json"
+      }
+    }
+  }
+}

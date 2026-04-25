@@ -1,0 +1,42 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "app_events",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "app_id",
+          "event_name",
+          "user_id",
+          "os_version",
+          "app_version",
+          "country_code"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "event_count"},
+        {"type": "doubleSum", "name": "revenue",      "fieldName": "revenue_usd"},
+        {"type": "longSum",   "name": "session_time", "fieldName": "session_ms"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "google",
+        "uris": ["gs://analytics-bucket/app_events/dt=2024-*/events_*.json.gz"]
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

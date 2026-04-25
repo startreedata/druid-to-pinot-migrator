@@ -1,0 +1,46 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "product_prices",
+      "timestampSpec": {
+        "column": "event_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "product_id",
+          "seller_id",
+          "marketplace"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "price_updates"},
+        {"type": "doubleMin", "name": "price_min",  "fieldName": "price"},
+        {"type": "doubleMax", "name": "price_max",  "fieldName": "price"},
+        {"type": "doubleSum", "name": "price_sum",  "fieldName": "price"},
+        {"type": "longMin",   "name": "qty_min",    "fieldName": "quantity"},
+        {"type": "longMax",   "name": "qty_max",    "fieldName": "quantity"},
+        {"type": "longSum",   "name": "qty_total",  "fieldName": "quantity"},
+        {"type": "floatSum",  "name": "score_sum",  "fieldName": "seller_score"},
+        {"type": "floatMin",  "name": "score_min",  "fieldName": "seller_score"},
+        {"type": "floatMax",  "name": "score_max",  "fieldName": "seller_score"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": true,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": ["s3://commerce-bucket/prices/"]
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}
