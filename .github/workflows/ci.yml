@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run unit + integration tests
+        run: pytest tests/unit tests/integration -v --tb=short
+
+      - name: CLI smoke — inspect / generate / validate
+        run: |
+          set -euo pipefail
+          dpm inspect tests/fixtures/raw_batch/spec.json --json > /tmp/inspect.json
+          test "$(jq -r .datasource_name /tmp/inspect.json)" = "pageviews"
+
+          dpm generate tests/fixtures/rolled_up/spec.json --out /tmp/smoke
+          test -f /tmp/smoke/schema.json
+          test -f /tmp/smoke/table-offline.json
+          test -f /tmp/smoke/reports/migration-summary.md
+
+          dpm validate tests/fixtures/raw_batch/spec.json --generated-dir /tmp/smoke --json \
+            > /tmp/validate.json
+          test "$(jq -r .overall_status /tmp/validate.json)" != "fail"
+
+      - name: Verify generated kafka FQCN
+        run: |
+          dpm generate tests/fixtures/raw_stream/spec.json --out /tmp/stream-smoke
+          jq -e '.tableIndexConfig.streamConfigs."stream.kafka.consumer.factory.class.name"
+                 | test("kafka30")' /tmp/stream-smoke/table-realtime.json

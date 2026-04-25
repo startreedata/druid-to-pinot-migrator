@@ -65,7 +65,7 @@ services:
 
   # ── Druid Coordinator ─────────────────────────────────────────────────────
   coordinator:
-    image: apache/druid:31.0.0
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
     container_name: migtest-coordinator
     depends_on:
       zookeeper:
@@ -91,7 +91,7 @@ services:
 
   # ── Druid Broker ──────────────────────────────────────────────────────────
   broker:
-    image: apache/druid:31.0.0
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
     container_name: migtest-broker
     depends_on:
       coordinator:
@@ -115,7 +115,7 @@ services:
 
   # ── Druid Historical ──────────────────────────────────────────────────────
   historical:
-    image: apache/druid:31.0.0
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
     container_name: migtest-historical
     depends_on:
       coordinator:
@@ -139,7 +139,7 @@ services:
 
   # ── Druid MiddleManager (indexing) ────────────────────────────────────────
   middlemanager:
-    image: apache/druid:31.0.0
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
     container_name: migtest-middlemanager
     depends_on:
       coordinator:
@@ -163,7 +163,7 @@ services:
 
   # ── Druid Router (SQL + unified API) ──────────────────────────────────────
   router:
-    image: apache/druid:31.0.0
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
     container_name: migtest-router
     depends_on:
       broker:
@@ -191,7 +191,7 @@ services:
 
   # ── Pinot Controller ──────────────────────────────────────────────────────
   pinot-controller:
-    image: apachepinot/pinot:1.5.0
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
     container_name: migtest-pinot-controller
     depends_on:
       zookeeper:
@@ -220,7 +220,7 @@ services:
 
   # ── Pinot Broker ──────────────────────────────────────────────────────────
   pinot-broker:
-    image: apachepinot/pinot:1.5.0
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
     container_name: migtest-pinot-broker
     depends_on:
       pinot-controller:
@@ -245,7 +245,7 @@ services:
 
   # ── Pinot Server ──────────────────────────────────────────────────────────
   pinot-server:
-    image: apachepinot/pinot:1.5.0
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
     container_name: migtest-pinot-server
     depends_on:
       pinot-controller:

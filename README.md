@@ -1,5 +1,8 @@
 # druid-pinot-migrator
 
+[![CI](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/ci.yml)
+[![Version Matrix](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/version-matrix.yml/badge.svg)](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/version-matrix.yml)
+
 A CLI tool for migrating Apache Druid ingestion specs to Apache Pinot artifacts.
 
 ## Overview
@@ -200,6 +203,33 @@ Clamped to `[0.0, 1.0]`.
 # Run tests with coverage
 .venv/bin/pytest tests/ --cov=migrator --cov-report=term-missing
 ```
+
+### Live Docker integration tests
+
+`tests/docker/` boots a real Druid + Pinot cluster via docker-compose and validates
+the full pipeline. They are gated behind `LIVE_DOCKER_TESTS=1` so they do not run
+by default. Versions are overridable via env vars:
+
+```bash
+DRUID_VERSION=30.0.0 PINOT_VERSION=1.4.0 LIVE_DOCKER_TESTS=1 \
+  .venv/bin/pytest tests/docker -v
+```
+
+If unset, the defaults from the README's tested combination apply.
+
+## Continuous Integration
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| [`ci.yml`](.github/workflows/ci.yml) | every push / PR | Unit + integration tests on Python 3.11 and 3.12; CLI smoke; verifies generated kafka FQCN |
+| [`version-matrix.yml`](.github/workflows/version-matrix.yml) | weekly + manual + relevant-paths push | Live Druid × Pinot integration suite over a curated matrix of versions; aggregates a single check for branch protection |
+
+The version-matrix workflow exercises the compatibility table in
+[Compatibility](#compatibility). To test a single cell on demand:
+
+> *Actions → Version Matrix (Live Docker) → Run workflow → fill in `druid_version` and/or `pinot_version`*
+
+Leave both inputs blank to run the full curated matrix.
 
 ## Known Limitations
 
