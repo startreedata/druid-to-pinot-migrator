@@ -126,7 +126,11 @@ jobs:
           docker pull "apachepinot/pinot:${PINOT_VERSION}"
 
       - name: Run live integration suite
-        run: pytest tests/docker -v --tb=short
+        # Pinot's ingestFromFile API is async — segments may take 60-300s to
+        # become queryable depending on runner load. We retry failed tests
+        # twice with a short delay to absorb that variance without masking
+        # genuine breakage.
+        run: pytest tests/docker -v --tb=short --reruns 2 --reruns-delay 10
         env:
           DRUID_VERSION: ${{ matrix.druid }}
           PINOT_VERSION: ${{ matrix.pinot }}

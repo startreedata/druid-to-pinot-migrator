@@ -254,14 +254,14 @@ services:
       - "18097:8097"
       - "18098:8098"
     environment:
-      JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseG1GC"
+      JAVA_OPTS: "-Xms512m -Xmx1500m -XX:+UseG1GC"
     command: >
       StartServer
       -zkAddress zookeeper:2181
       -clusterName migtest-pinot
     networks:
       - migtest
-    mem_limit: 768m
+    mem_limit: 2g
     healthcheck:
       # Pinot server health is on the admin port (8097), not 8098
       test: ["CMD-SHELL", "curl -sf http://localhost:8097/health || exit 1"]
