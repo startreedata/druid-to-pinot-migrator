@@ -12,6 +12,61 @@ A CLI tool for migrating Apache Druid ingestion specs to Apache Pinot artifacts.
 - Risk analysis report (JSON + Markdown)
 - Validation report
 
+## Compatibility
+
+The tool operates at the ingestion-spec JSON layer and does not connect to running clusters during translation, so compatibility is governed by the spec / artifact formats on each side.
+
+### Tested combination
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Apache Druid (source) | **31.0.0** | Live integration suite (`tests/docker/`) and `examples/quickstart/` |
+| Apache Pinot (target) | **1.4.0** | Live integration suite (`tests/docker/`) and `examples/quickstart/` |
+| Python | 3.11+ | Runtime requirement |
+
+### Version compatibility matrix
+
+The cells indicate the expected outcome of translating a Druid spec from the row version into Pinot artifacts deployable on the column version.
+
+|                       | Pinot 1.4.x   | Pinot 1.0.x – 1.3.x | Pinot 0.12.x        | Pinot ≤ 0.11.x      |
+|-----------------------|---------------|---------------------|---------------------|---------------------|
+| **Druid 30.x – 31.x** | ✅ Tested     | ✅ Supported        | ⚠️ Mostly works     | ❌ Not supported     |
+| **Druid 24.x – 29.x** | ✅ Supported  | ✅ Supported        | ⚠️ Mostly works     | ❌ Not supported     |
+| **Druid 0.20 – 23.x** | ✅ Supported  | ✅ Supported        | ⚠️ Mostly works     | ❌ Not supported     |
+| **Druid < 0.20**      | ❌ Not supported | ❌ Not supported | ❌ Not supported    | ❌ Not supported     |
+
+Legend:
+- ✅ **Tested** — covered by the live Docker integration suite that boots both clusters and validates query parity.
+- ✅ **Supported** — same Druid spec layout and same Pinot artifact format as the tested cell; expected to work without changes.
+- ⚠️ **Mostly works** — generated artifacts deploy, but newer fields (e.g., index plug-in flags) may be silently ignored. Review after deploy.
+- ❌ **Not supported** — spec or artifact format predates what the tool emits / parses; deployment will likely fail.
+
+### Why the bounds
+
+**Druid ≥ 0.20** — the tool models the modern ingestion API (`index_parallel`, `kafka`, `kinesis` ioConfigs) and both the legacy top-level `dataSchema` and the current nested `spec.dataSchema` layouts. Pre-0.20 specs (legacy `index` task, deprecated firehoses) are not modeled and will fail to parse cleanly.
+
+**Pinot ≥ 0.12** — generated `schema.json` uses the compact `dateTimeFieldSpec` format (`"1:MILLISECONDS:EPOCH"` / `"1:MILLISECONDS:SIMPLE_DATE_FORMAT:..."`) and `table-realtime.json` uses the modern `tableIndexConfig.streamConfigs` block. Earlier Pinot versions (≤ 0.11.x) used split `format` / `granularity` fields and a different stream-config shape, and will reject the generated artifacts.
+
+### Spec-feature support snapshot
+
+| Druid feature | Pinot equivalent in generated artifact | Risk emitted |
+|---------------|----------------------------------------|--------------|
+| `index_parallel` (batch) | `OFFLINE` table + `batch-job.json` | — |
+| `kafka` ioConfig | `REALTIME` table + Kafka `streamConfigs` | — |
+| `kinesis` ioConfig | `REALTIME` table + Kafka defaults | `STREAM_SOURCE_MISMATCH` (HIGH) |
+| `rollup: true` + additive metrics | `OFFLINE` table | `ROLLUP_SEMANTIC_MISMATCH` (HIGH) |
+| `count`, `longSum`, `doubleSum`, min/max | Pinot SUM / MIN / MAX columns | — |
+| Sketch metrics (`thetaSketch`, `HLL*`, `hyperUnique`, …) | `BYTES` column | `APPROX_AGGREGATOR_MISMATCH` (BLOCKING) |
+| `multiValueHandling` dimensions | `singleValueField: false` | `MULTIVALUE_AMBIGUITY` (MEDIUM) |
+| `transformSpec.transforms` | — | `TRANSFORM_PORTABILITY_RISK` (MEDIUM) |
+| `flattenSpec` | — | `FLATTEN_SPEC_NOT_PORTABLE` (HIGH) |
+| `partitionsSpec` (hash / range) | — | `PARTITIONING_CONFIG_REQUIRED` (MEDIUM) |
+| Custom `timestampSpec.format` | `SIMPLE_DATE_FORMAT` mapping | `CUSTOM_TIMESTAMP_FORMAT` (MEDIUM) |
+| `appendToExisting: true` | `APPEND` ingestion type | `INGESTION_BEHAVIOR_MISMATCH` (info) |
+| Cloud `inputSource` (S3, GCS, Azure) | URI propagated to `batch-job.json` | — (review `pinotFSSpecs`) |
+
+See [docs/reference/risks.md](docs/reference/risks.md) for the full risk taxonomy.
+
 ## Installation
 
 ```bash
@@ -143,14 +198,6 @@ Clamped to `[0.0, 1.0]`.
 # Run tests with coverage
 .venv/bin/pytest tests/ --cov=migrator --cov-report=term-missing
 ```
-
-## Supported Druid Spec Formats
-
-- `index_parallel` (native batch)
-- `kafka` (Kafka indexing service)
-- `kinesis` (Kinesis indexing service)
-- Top-level `dataSchema` (legacy format)
-- Nested `spec.dataSchema` (current format)
 
 ## Known Limitations
 
