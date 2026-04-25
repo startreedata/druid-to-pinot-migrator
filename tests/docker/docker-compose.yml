@@ -69,12 +69,17 @@ services:
     networks:
       - migtest
     mem_limit: 768m
+    # Healthcheck deliberately uses nc (busybox-provided in bitnami images)
+    # rather than `kafka-broker-api-versions.sh`, which is heavier and was
+    # observed flaking under CI runner pressure. Kafka readiness for the
+    # actual realtime tests is double-checked from the test side via
+    # KafkaTestClient.wait_healthy().
     healthcheck:
-      test: ["CMD-SHELL", "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
+      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   # ── Postgres (Druid metadata) ──────────────────────────────────────────────
   postgres:
