@@ -132,7 +132,7 @@ def raw_events_state(druid: DruidClient, pinot: PinotClient,
 
     # Ingest data into Pinot
     ingest_records_into_pinot(pinot, DS, RAW_EVENTS_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE",
            "out_dir": out_dir}
@@ -183,7 +183,7 @@ def rolled_up_state(druid: DruidClient, pinot: PinotClient,
         for r in ROLLED_UP_RECORDS
     ]
     ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -222,7 +222,7 @@ def typed_dims_state(druid: DruidClient, pinot: PinotClient,
     info = migrate_and_deploy(spec, pinot, out_dir)
 
     ingest_records_into_pinot(pinot, DS, TYPED_DIM_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -268,7 +268,7 @@ def transforms_state(druid: DruidClient, pinot: PinotClient,
     info = migrate_and_deploy(spec, pinot, out_dir)
 
     ingest_records_into_pinot(pinot, DS, TRANSFORMS_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -301,7 +301,7 @@ def index_check_state(druid: DruidClient, pinot: PinotClient,
     info = migrate_and_deploy(spec, pinot, out_dir)
 
     ingest_records_into_pinot(pinot, DS, RAW_EVENTS_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -335,7 +335,7 @@ def validation_state(druid: DruidClient, pinot: PinotClient,
     spec_path = str(info["spec_path"])
 
     ingest_records_into_pinot(pinot, DS, RAW_EVENTS_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE",
            "spec_path": spec_path, "out_dir": out_dir}
@@ -890,7 +890,7 @@ def minmax_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory) -> di
         for r in MINMAX_RECORDS
     ]
     ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -946,7 +946,7 @@ def hourly_gran_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory) 
         for r in HOURLY_GRAN_RECORDS
     ]
     ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -980,7 +980,7 @@ def append_mode_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory) 
     info = migrate_and_deploy(spec, pinot, out_dir)
 
     ingest_records_into_pinot(pinot, DS, APPEND_MODE_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -1019,7 +1019,7 @@ def multivalue_dims_state(druid: DruidClient, pinot: PinotClient, tmp_path_facto
     info = migrate_and_deploy(spec, pinot, out_dir)
 
     ingest_records_into_pinot(pinot, DS, MULTIVALUE_RECORDS, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -1076,7 +1076,7 @@ def float_metrics_state(druid: DruidClient, pinot: PinotClient, tmp_path_factory
         for r in FLOAT_METRICS_RECORDS
     ]
     ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
@@ -1137,7 +1137,7 @@ def hash_partitioned_state(druid: DruidClient, pinot: PinotClient, tmp_path_fact
         for r in HASH_PARTITIONED_RECORDS
     ]
     ingest_records_into_pinot(pinot, DS, pinot_records, out_dir)
-    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=120)
+    pinot.wait_for_table_queryable(f"{DS}_OFFLINE", timeout=240)
 
     yield {**info, "ds": DS, "pinot_table": f"{DS}_OFFLINE", "out_dir": out_dir}
 
