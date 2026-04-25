@@ -43,6 +43,7 @@ If you hit a risk or warning during migration, consult the
 | 16 | [Understanding Risks and Confidence Scores](16-risks-and-confidence.md) | All patterns | Risk taxonomy, scoring, remediation |
 | 17 | [Validating the Migration](17-validation.md) | Post-generate workflow | Validation checks, artifact parity |
 | 18 | [Production Migration Checklist](18-production-checklist.md) | End-to-end | Pre/post migration verification |
+| 19 | [Realtime (Hybrid) Migration](19-realtime-migration.md) | Druid Kafka supervisor | Watermark extraction, hybrid OFFLINE+REALTIME plan, backfill |
 
 ---
 

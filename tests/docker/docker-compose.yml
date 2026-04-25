@@ -45,6 +45,37 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── Kafka (KRaft single-node, no ZK dependency) ──────────────────────────
+  # Used for the realtime migration tests (Druid Kafka indexing supervisor +
+  # Pinot REALTIME ingestion in the same flow). Default port 19092 published
+  # to the host so tests can produce messages directly.
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: migtest-kafka
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:19092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    networks:
+      - migtest
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
   # ── Postgres (Druid metadata) ──────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine

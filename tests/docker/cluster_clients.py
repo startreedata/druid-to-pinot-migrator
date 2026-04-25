@@ -22,6 +22,10 @@ DRUID_COORDINATOR_URL = "http://localhost:18081"
 PINOT_CONTROLLER_URL = "http://localhost:19000"
 PINOT_BROKER_URL = "http://localhost:18099"
 
+# Host-side bootstrap (for tests) and in-network bootstrap (for Druid+Pinot)
+KAFKA_BOOTSTRAP_HOST = "localhost:19092"
+KAFKA_BOOTSTRAP_INTERNAL = "kafka:9092"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Druid client
@@ -397,3 +401,181 @@ class PinotClient:
             for segs in entry.values():
                 total += len(segs)
         return total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kafka test client
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class KafkaTestClient:
+    """Tiny producer/admin wrapper used by realtime live tests."""
+
+    def __init__(self, bootstrap: str = KAFKA_BOOTSTRAP_HOST) -> None:
+        self.bootstrap = bootstrap
+
+    def wait_healthy(self, timeout: int = 60) -> None:
+        from kafka import KafkaAdminClient
+        deadline = time.time() + timeout
+        last_err: Exception | None = None
+        while time.time() < deadline:
+            try:
+                admin = KafkaAdminClient(bootstrap_servers=self.bootstrap)
+                admin.list_topics()
+                admin.close()
+                return
+            except Exception as e:
+                last_err = e
+                time.sleep(2)
+        raise TimeoutError(f"Kafka not healthy: {last_err}")
+
+    def create_topic(self, topic: str, partitions: int = 1) -> None:
+        from kafka import KafkaAdminClient
+        from kafka.admin import NewTopic
+        from kafka.errors import TopicAlreadyExistsError
+
+        admin = KafkaAdminClient(bootstrap_servers=self.bootstrap)
+        try:
+            admin.create_topics(
+                [NewTopic(name=topic, num_partitions=partitions,
+                          replication_factor=1)]
+            )
+        except TopicAlreadyExistsError:
+            pass
+        finally:
+            admin.close()
+
+    def produce_json(
+        self,
+        topic: str,
+        records: list[dict],
+        key_field: str | None = None,
+    ) -> None:
+        """Produce JSON-serialised records, optionally keyed by a field."""
+        from kafka import KafkaProducer
+
+        producer = KafkaProducer(
+            bootstrap_servers=self.bootstrap,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            key_serializer=(
+                (lambda k: str(k).encode("utf-8")) if key_field else None
+            ),
+            acks="all",
+            retries=3,
+        )
+        for rec in records:
+            producer.send(
+                topic,
+                value=rec,
+                key=rec[key_field] if key_field else None,
+            )
+        producer.flush(timeout=30)
+        producer.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Druid supervisor helper (Kafka indexing service)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class DruidSupervisorClient:
+    """Helpers for Druid Kafka supervisors used by realtime live tests."""
+
+    def __init__(self, router_url: str = DRUID_ROUTER_URL):
+        self.router_url = router_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+
+    def submit_kafka_supervisor(
+        self,
+        datasource: str,
+        topic: str,
+        bootstrap_servers: str = KAFKA_BOOTSTRAP_INTERNAL,
+        timestamp_col: str = "timestamp",
+        timestamp_format: str = "millis",
+        dimensions: list[str] | None = None,
+    ) -> str:
+        """Submit a Kafka supervisor spec; return supervisor ID."""
+        spec = {
+            "type": "kafka",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": datasource,
+                    "timestampSpec": {
+                        "column": timestamp_col,
+                        "format": timestamp_format,
+                    },
+                    "dimensionsSpec": {"dimensions": dimensions or []},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "type": "uniform",
+                        "segmentGranularity": "HOUR",
+                        "queryGranularity": "MINUTE",
+                        "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "topic": topic,
+                    "consumerProperties": {
+                        "bootstrap.servers": bootstrap_servers,
+                    },
+                    "useEarliestOffset": True,
+                    "taskCount": 1,
+                    "replicas": 1,
+                    "taskDuration": "PT300S",
+                },
+                "tuningConfig": {
+                    "type": "kafka",
+                    "maxRowsInMemory": 10_000,
+                    "maxRowsPerSegment": 100_000,
+                },
+            },
+        }
+        r = self.session.post(
+            f"{self.router_url}/druid/indexer/v1/supervisor",
+            data=json.dumps(spec),
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()["id"]
+
+    def wait_for_offsets(
+        self,
+        supervisor_id: str,
+        min_total_offset: int,
+        timeout: int = 240,
+    ) -> dict:
+        """
+        Poll supervisor status until cumulative offsets across all
+        partitions reach ``min_total_offset``. Returns the last status.
+        """
+        url = f"{self.router_url}/druid/indexer/v1/supervisor/{supervisor_id}/status"
+        deadline = time.time() + timeout
+        last: dict = {}
+        while time.time() < deadline:
+            try:
+                r = self.session.get(url, timeout=10)
+                r.raise_for_status()
+                last = r.json()
+                offsets = (
+                    (last.get("payload") or {}).get("latestOffsets")
+                    or (last.get("payload") or {}).get("currentOffsets")
+                    or {}
+                )
+                total = sum(int(v) for v in offsets.values())
+                if total >= min_total_offset:
+                    return last
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(
+            f"Supervisor {supervisor_id} did not reach total offset "
+            f"{min_total_offset} within {timeout}s. Last={last}"
+        )
+
+    def terminate_supervisor(self, supervisor_id: str) -> None:
+        url = f"{self.router_url}/druid/indexer/v1/supervisor/{supervisor_id}/terminate"
+        try:
+            self.session.post(url, timeout=10)
+        except Exception:
+            pass

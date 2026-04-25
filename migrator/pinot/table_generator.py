@@ -4,6 +4,56 @@ from migrator.core.enums import SourceKind
 from migrator.core.models import CanonicalMigrationModel
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Default-tunable Pinot keys; lifted to module constants so callers can
+# inspect or override them and tests can assert against them stably.
+# ─────────────────────────────────────────────────────────────────────────────
+
+KAFKA_CONSUMER_FACTORY = "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory"
+KAFKA_JSON_DECODER = "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"
+DEFAULT_OFFSET_RESET = "largest"
+"""Used when no migration watermark is supplied. Matches the historical
+Pinot default for new REALTIME tables."""
+
+
+def build_kafka_stream_configs(
+    *,
+    topic: str,
+    broker_list: str,
+    offset_criteria: str = DEFAULT_OFFSET_RESET,
+    decoder_class: str = KAFKA_JSON_DECODER,
+    flush_threshold_rows: str = "1000000",
+    flush_threshold_time: str = "1h",
+) -> dict[str, str]:
+    """
+    Build a Pinot ``streamConfigs`` dict for a Kafka REALTIME table.
+
+    ``offset_criteria`` accepts any value Pinot ``OffsetCriteria`` understands:
+
+    - ``"smallest"`` / ``"largest"`` — start at topic head/tail.
+    - An ISO-8601 timestamp like ``"2024-03-01T00:00:00.000Z"`` — Pinot's
+      TIMESTAMP offset criterion. **This is the migration-watermark mode**:
+      Pinot starts consumption at this timestamp, so it picks up exactly
+      where Druid's REALTIME ingestion stopped.
+    - A relative period like ``"7d"`` or ``"4h30m"`` — Pinot's PERIOD
+      offset criterion (relative to broker request time).
+
+    Pulled out as a free function so the hybrid planner and the existing
+    PinotTableGenerator can share one definition.
+    """
+    return {
+        "streamType": "kafka",
+        "stream.kafka.topic.name": topic,
+        "stream.kafka.broker.list": broker_list,
+        "stream.kafka.consumer.type": "lowlevel",
+        "stream.kafka.consumer.factory.class.name": KAFKA_CONSUMER_FACTORY,
+        "stream.kafka.decoder.class.name": decoder_class,
+        "stream.kafka.consumer.prop.auto.offset.reset": offset_criteria,
+        "realtime.segment.flush.threshold.rows": flush_threshold_rows,
+        "realtime.segment.flush.threshold.time": flush_threshold_time,
+    }
+
+
 class PinotTableGenerator:
     """Generate Pinot offline and realtime table config dicts."""
 
@@ -41,31 +91,35 @@ class PinotTableGenerator:
             },
         }
 
-    def generate_realtime(self, canonical: CanonicalMigrationModel) -> dict:
-        """Generate a REALTIME table configuration."""
+    def generate_realtime(
+        self,
+        canonical: CanonicalMigrationModel,
+        *,
+        watermark_iso: str | None = None,
+    ) -> dict:
+        """
+        Generate a REALTIME table configuration.
+
+        If ``watermark_iso`` is provided, the generated stream config uses it
+        as the ``auto.offset.reset`` value (Pinot's TIMESTAMP offset criterion),
+        so Pinot starts consumption from that point. Use this for hybrid
+        Druid → Pinot migrations where Druid has already ingested everything
+        before the watermark.
+        """
         time_column = canonical.time_field.column_name if canonical.time_field else "__time"
         table_name = f"{canonical.datasource_name}_REALTIME"
 
-        # Extract kafka info from raw io_config if available
         io = canonical.raw_io_config or {}
         consumer_props = io.get("consumerProperties", {})
         broker_list = consumer_props.get("bootstrap.servers", "localhost:9092")
         topic = io.get("topic", canonical.datasource_name)
 
-        stream_configs = {
-            "streamType": "kafka",
-            "stream.kafka.topic.name": topic,
-            "stream.kafka.broker.list": broker_list,
-            "stream.kafka.consumer.type": "lowlevel",
-            "stream.kafka.consumer.factory.class.name": (
-                "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory"
-            ),
-            "stream.kafka.decoder.class.name": (
-                "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"
-            ),
-            "realtime.segment.flush.threshold.rows": "1000000",
-            "realtime.segment.flush.threshold.time": "1h",
-        }
+        offset_criteria = watermark_iso or DEFAULT_OFFSET_RESET
+        stream_configs = build_kafka_stream_configs(
+            topic=topic,
+            broker_list=broker_list,
+            offset_criteria=offset_criteria,
+        )
 
         return {
             "tableName": table_name,

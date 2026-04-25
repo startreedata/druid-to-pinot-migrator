@@ -24,6 +24,7 @@ dev = [
     "pytest-timeout>=2.0",
     "pytest-rerunfailures>=14.0",
     "requests>=2.31",
+    "kafka-python>=2.0",
 ]
 
 [project.scripts]

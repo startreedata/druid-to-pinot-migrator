@@ -151,6 +151,25 @@ Options:
   --json                  Output validation report as JSON
 ```
 
+### Hybrid (REALTIME + OFFLINE) commands
+
+For migrating Druid Kafka realtime datasources without data loss or
+duplication. See [Tutorial 19](docs/19-realtime-migration.md).
+
+```
+dpm extract-offsets --supervisor-id S --overlord-url URL --out offsets.json
+dpm plan-hybrid <spec> --offset-map offsets.json --out ./hybrid-output
+dpm backfill-batch --datasource D --pinot-table T \
+                   --start-iso S --end-iso E \
+                   --druid-router URL --pinot-controller URL
+```
+
+| Command | Cluster contact | Purpose |
+|---------|-----------------|---------|
+| `extract-offsets` | Druid Overlord | Snapshot per-partition offsets + watermark timestamp |
+| `plan-hybrid`     | None (pure)    | Generate OFFLINE+REALTIME table configs and runbook |
+| `backfill-batch`  | Druid + Pinot  | Page Druid SQL → NDJSON → Pinot OFFLINE (small/medium data) |
+
 ## Package Layout
 
 ```
