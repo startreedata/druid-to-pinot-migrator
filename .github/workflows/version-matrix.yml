@@ -32,6 +32,8 @@ on:
     paths:
       - "tests/docker/**"
       - "migrator/pinot/**"
+      - "migrator/druid/**"
+      - "migrator/realtime/**"
       - ".github/workflows/version-matrix.yml"
       - "examples/quickstart/docker-compose.yml"
 
