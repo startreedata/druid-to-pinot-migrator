@@ -87,7 +87,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -109,7 +109,7 @@ jobs:
     outputs:
       sha: ${{ steps.tag.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Need full history so we can resolve "previous tag" later.
           fetch-depth: 0
@@ -185,7 +185,7 @@ jobs:
         || needs.prepare-release.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Always build from the tagged commit so the artifact and the
           # release-page metadata agree on what's inside.
@@ -232,7 +232,7 @@ jobs:
     needs: [resolve, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve.outputs.tag }}
           fetch-depth: 0
