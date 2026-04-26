@@ -125,11 +125,14 @@ class DruidCoordinatorClient:
         Druid collapse them into a single merged entry.
         """
         url = f"{self._broker}/druid/v2/"
+        # Don't restrict analysisTypes — Druid's default response already
+        # includes the columns + intervals + size we need, and an earlier
+        # attempt at narrowing to ["interval", "size", "rowSignature"]
+        # broke because ROWSIGNATURE isn't a valid AnalysisType enum.
         payload = {
             "queryType": "segmentMetadata",
             "dataSource": datasource,
             "merge": True,
-            "analysisTypes": ["interval", "size", "rowSignature"],
         }
         body = self._json_post(url, payload)
         if not isinstance(body, list) or not body:
