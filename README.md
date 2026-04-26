@@ -5,6 +5,10 @@
 
 A CLI tool for migrating Apache Druid ingestion specs to Apache Pinot artifacts.
 
+> Maintained by **[StarTree](https://startree.ai)**. Licensed under the
+> [StarTree Community License](LICENSE). Issues and pull requests are
+> welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Overview
 
 `druid-pinot-migrator` (`dpm`) parses Druid ingestion specs (batch `index_parallel`, Kafka streaming, and related formats), normalises them into a canonical model, and generates:
@@ -288,3 +292,20 @@ Leave both inputs blank to run the full curated matrix.
 2. Druid expression-based transforms (`transformSpec`) have no direct Pinot equivalent; they must be applied upstream.
 3. Druid multi-value dimensions require careful validation of query semantics after migration.
 4. The generated Pinot configs use conservative defaults; review and tune for production workloads.
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup, test workflow, and
+review expectations. Security issues should be reported privately;
+see [SECURITY.md](SECURITY.md). All contributors are expected to follow
+the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Trademarks
+
+This project is not affiliated with, nor endorsed by, the Apache Software
+Foundation. **Apache®**, **Apache Druid®**, **Apache Pinot®**, and the
+respective project logos are trademarks of the Apache Software Foundation.
+This project's use of these names is solely to describe what the tool
+operates on (Apache Druid ingestion specs and Apache Pinot table configs)
+and does not imply any sponsorship or endorsement.
