@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -58,14 +59,51 @@ def docker_stack():
     compose_file = DOCKER_DIR / "docker-compose.yml"
 
     def run(args: list[str], **kwargs):
-        return subprocess.run(
+        proc = subprocess.run(
             ["docker", "compose", "-f", str(compose_file)] + args,
             cwd=str(DOCKER_DIR),
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             **kwargs,
         )
+        if proc.returncode != 0:
+            # Print whatever docker compose said before raising — otherwise
+            # the captured output is silently swallowed and CI logs only
+            # show "exit status 1", which is useless for debugging.
+            sys.stderr.write(
+                f"\n[docker compose {' '.join(args)}] exit={proc.returncode}\n"
+                f"--- stdout ---\n{proc.stdout}\n"
+                f"--- stderr ---\n{proc.stderr}\n"
+            )
+            # Capture per-container state and last-100 logs to make the
+            # failure self-diagnosing.
+            try:
+                ps = subprocess.run(
+                    ["docker", "ps", "-a", "--filter", "name=migtest-",
+                     "--format", "{{.Names}}\t{{.Status}}"],
+                    capture_output=True, text=True, check=False,
+                )
+                sys.stderr.write(f"--- container state ---\n{ps.stdout}\n")
+                for line in ps.stdout.splitlines():
+                    name = line.split("\t", 1)[0].strip()
+                    if not name:
+                        continue
+                    logs = subprocess.run(
+                        ["docker", "logs", "--tail=80", name],
+                        capture_output=True, text=True, check=False,
+                    )
+                    sys.stderr.write(
+                        f"--- {name} (last 80 lines) ---\n"
+                        f"{logs.stdout}\n{logs.stderr}\n"
+                    )
+            except Exception as diag_exc:  # noqa: BLE001
+                sys.stderr.write(f"(diagnostics failed: {diag_exc})\n")
+            sys.stderr.flush()
+            raise subprocess.CalledProcessError(
+                proc.returncode, proc.args, proc.stdout, proc.stderr
+            )
+        return proc
 
     # Bring up the whole stack (images are expected to be present locally)
     run(["up", "-d", "--wait", "--wait-timeout", "420"])
