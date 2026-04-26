@@ -132,6 +132,24 @@ def pinot(docker_stack) -> PinotClient:
     return client
 
 
+@pytest.fixture(scope="session")
+def kafka_client(docker_stack):
+    """Shared Kafka admin/producer client for any live test that needs it."""
+    from tests.docker.cluster_clients import KafkaTestClient
+
+    k = KafkaTestClient()
+    k.wait_healthy(timeout=120)
+    return k
+
+
+@pytest.fixture(scope="session")
+def supervisor_client(docker_stack):
+    """Shared helper for submitting Druid Kafka supervisors."""
+    from tests.docker.cluster_clients import DruidSupervisorClient
+
+    return DruidSupervisorClient()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-test helpers
 # ─────────────────────────────────────────────────────────────────────────────

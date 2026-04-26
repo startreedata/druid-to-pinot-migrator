@@ -59,18 +59,6 @@ def _events(start_idx: int, count: int, *, ms_offset: int) -> list[dict]:
 
 
 @pytest.fixture(scope="module")
-def kafka_client() -> KafkaTestClient:
-    k = KafkaTestClient()
-    k.wait_healthy(timeout=120)
-    return k
-
-
-@pytest.fixture(scope="module")
-def supervisor_client() -> DruidSupervisorClient:
-    return DruidSupervisorClient()
-
-
-@pytest.fixture(scope="module")
 def realtime_state(
     druid: DruidClient,
     pinot: PinotClient,
