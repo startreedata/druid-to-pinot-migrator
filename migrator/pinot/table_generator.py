@@ -9,7 +9,23 @@ from migrator.core.models import CanonicalMigrationModel
 # inspect or override them and tests can assert against them stably.
 # ─────────────────────────────────────────────────────────────────────────────
 
-KAFKA_CONSUMER_FACTORY = "org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory"
+KAFKA_CONSUMER_FACTORY = "org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory"
+"""
+The ``kafka20`` package (Kafka 2.0 client plugin) is what we emit by default.
+
+Compatibility rationale:
+  - Pinot 1.0 – 1.4 ship the ``pinot-kafka-2.0`` plugin; the FQCN works directly.
+  - Pinot 1.5 removed the ``pinot-kafka-2.0`` plugin in favour of
+    ``pinot-kafka-3.0``, but adds a backward-compatibility alias in
+    ``PluginManager`` that transparently maps ``kafka20.KafkaConsumerFactory``
+    → ``kafka30.KafkaConsumerFactory`` at deserialise time.
+
+Therefore emitting ``kafka20`` works on every Pinot 1.x release we support,
+while ``kafka30`` would break Pinot ≤ 1.3 (the plugin doesn't exist there).
+Operators who target Pinot 1.4+ exclusively can rewrite the FQCN by hand
+or via a sed / jq post-processing step; the tool defaults to maximum
+compatibility.
+"""
 KAFKA_JSON_DECODER = "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"
 DEFAULT_OFFSET_RESET = "largest"
 """Used when no migration watermark is supplied. Matches the historical

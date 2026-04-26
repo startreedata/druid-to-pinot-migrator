@@ -52,5 +52,7 @@ jobs:
       - name: Verify generated kafka FQCN
         run: |
           dpm generate tests/fixtures/raw_stream/spec.json --out /tmp/stream-smoke
+          # We emit kafka20 (NOT kafka30) by design — see KAFKA_CONSUMER_FACTORY
+          # docstring in table_generator.py for the compatibility rationale.
           jq -e '.tableIndexConfig.streamConfigs."stream.kafka.consumer.factory.class.name"
-                 | test("kafka30")' /tmp/stream-smoke/table-realtime.json
+                 | test("kafka20")' /tmp/stream-smoke/table-realtime.json

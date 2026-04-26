@@ -50,7 +50,7 @@ Legend:
 
 **Pinot ≥ 0.12** — generated `schema.json` uses the compact `dateTimeFieldSpec` format (`"1:MILLISECONDS:EPOCH"` / `"1:MILLISECONDS:SIMPLE_DATE_FORMAT:..."`) and `table-realtime.json` uses the modern `tableIndexConfig.streamConfigs` block. Earlier Pinot versions (≤ 0.11.x) used split `format` / `granularity` fields and a different stream-config shape, and will reject the generated artifacts.
 
-**Note on Pinot 1.5** — Pinot 1.5.0 removed the `pinot-kafka-2.0` plugin in favour of `pinot-kafka-3.0` (Kafka 3/4 clients). Generated REALTIME tables emit the `kafka30` consumer factory class name (`org.apache.pinot.plugin.stream.kafka30.KafkaConsumerFactory`), which is shipped by both Pinot 1.4 and 1.5 with the same FQCN, so the same generated artifact deploys cleanly on either release. (Pinot also keeps a backward-compat alias for the old `kafka20` class name, but new artifacts use the canonical name.)
+**Note on Pinot 1.5** — Pinot 1.5.0 removed the `pinot-kafka-2.0` plugin in favour of `pinot-kafka-3.0`, but added a backward-compat **alias** in `PluginManager` that transparently maps the legacy `kafka20.KafkaConsumerFactory` class name to the new `kafka30` one at deserialise time. The migrator therefore emits the `kafka20` FQCN — it works directly on Pinot 1.0 – 1.4 (where the plugin still ships) and works on Pinot 1.5+ via the alias, so the same generated artifact deploys cleanly on the entire supported range.
 
 ### Spec-feature support snapshot
 
