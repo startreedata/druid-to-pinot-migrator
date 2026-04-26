@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "druid-to-pinot-migrator"
+version = "0.1.0"
+description = "Migrate Apache Druid ingestion specs to Apache Pinot artifacts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "StarTree Community License"}
+authors = [{name = "StarTree"}]
+maintainers = [{name = "StarTree", email = "support@startree.ai"}]
+keywords = [
+    "apache-druid",
+    "apache-pinot",
+    "migration",
+    "data-ingestion",
+    "olap",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "typer>=0.9",
+    "pyyaml>=6.0",
+    "jinja2>=3.0",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/startreedata/druid-to-pinot-migrator"
+Documentation = "https://github.com/startreedata/druid-to-pinot-migrator/tree/main/docs"
+Repository = "https://github.com/startreedata/druid-to-pinot-migrator"
+Issues = "https://github.com/startreedata/druid-to-pinot-migrator/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.0",
+    "pytest-rerunfailures>=14.0",
+    "requests>=2.31",
+    "kafka-python>=2.0",
+]
+
+[project.scripts]
+dpm = "migrator.cli.app:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["migrator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 600

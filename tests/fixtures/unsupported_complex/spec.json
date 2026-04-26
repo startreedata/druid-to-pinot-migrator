@@ -1,0 +1,35 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "audience_segments",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["segment_id", "advertiser_id"]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "event_count"},
+        {"type": "thetaSketch", "name": "unique_users", "fieldName": "user_id", "size": 16384},
+        {"type": "HLLSketchBuild", "name": "approx_users", "fieldName": "user_id"},
+        {"type": "hyperUnique", "name": "hll_users", "fieldName": "user_id"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/data/audience"
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

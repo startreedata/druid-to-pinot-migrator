@@ -1,0 +1,40 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "audit_trail",
+      "timestampSpec": {
+        "column": "created_at",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "entity_type",
+          "entity_id",
+          "action",
+          "actor_id",
+          "tenant_id"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "event_count"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": ["s3://audit-bucket/trail/2024/"]
+      },
+      "inputFormat": {"type": "json"},
+      "appendToExisting": true
+    }
+  }
+}

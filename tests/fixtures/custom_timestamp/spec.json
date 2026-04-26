@@ -1,0 +1,42 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "access_logs",
+      "timestampSpec": {
+        "column": "log_time",
+        "format": "dd/MMM/yyyy:HH:mm:ss Z",
+        "missingValue": "1970-01-01T00:00:00Z"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "host",
+          "method",
+          "path",
+          "status_code",
+          "user_agent"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "request_count"},
+        {"type": "longSum", "name": "bytes_sent", "fieldName": "bytes"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "HOUR",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/var/log/nginx",
+        "filter": "*.log"
+      },
+      "inputFormat": {"type": "json"}
+    }
+  }
+}

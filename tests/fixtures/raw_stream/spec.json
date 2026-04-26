@@ -1,0 +1,31 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "clickstream",
+      "timestampSpec": {
+        "column": "event_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["user_id", "event_type", "url"]
+      },
+      "metricsSpec": [],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "NONE",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "consumerProperties": {
+        "bootstrap.servers": "localhost:9092"
+      },
+      "topic": "clickstream-events",
+      "taskCount": 1,
+      "replicas": 1
+    }
+  }
+}

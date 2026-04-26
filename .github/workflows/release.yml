@@ -1,0 +1,360 @@
+name: Release
+
+# One-shot release pipeline. Triggered manually with a target version
+# (e.g. 0.2.0). The workflow then:
+#
+#   1. Validates the version string (semver-ish: MAJOR.MINOR.PATCH[-PRERELEASE])
+#   2. Runs the test suite on the current main
+#   3. Bumps the version in pyproject.toml if needed and commits
+#   4. Creates and pushes the `vX.Y.Z` git tag (idempotent)
+#   5. Builds an sdist + wheel against the tagged commit
+#   6. Creates a GitHub Release with auto-generated notes from commits
+#      since the previous tag, and attaches both artifacts as release
+#      assets
+#   7. Publishes the wheel + sdist to PyPI using the PYPI_TOKEN secret
+#
+# A `release/v*` tag-push trigger is also supported for users who
+# prefer the manual git-tag-driven flow (skips step 3 — assumes the
+# pyproject.toml version already matches the tag).
+#
+# Failure recovery: every step that mutates state is idempotent. Re-run
+# the workflow with the same version input after fixing whatever broke
+# (e.g. transient PyPI hiccup). Existing tag / release / PyPI version
+# will not be re-created or duplicated.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0). DO NOT prefix with 'v'."
+        required: true
+      dry_run:
+        description: "Dry-run: build everything but skip the PyPI upload."
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write     # push the version-bump commit, push the tag, create the GitHub Release
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Resolve the target version regardless of trigger.
+  # workflow_dispatch → uses the input string.
+  # push tag         → strips the leading 'v'.
+  # ──────────────────────────────────────────────────────────────────────
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set.outputs.version }}
+      tag:     ${{ steps.set.outputs.tag }}
+      dry_run: ${{ steps.set.outputs.dry_run }}
+    steps:
+      - id: set
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION='${{ github.event.inputs.version }}'
+            DRY='${{ github.event.inputs.dry_run }}'
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            DRY="false"
+          fi
+
+          # Validate: 1.2.3 or 1.2.3-rc1 or 1.2.3.dev1
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.\-][a-zA-Z0-9]+)?$ ]]; then
+            echo "::error::Invalid version format: '$VERSION' (expected MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-PRERELEASE)"
+            exit 1
+          fi
+
+          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"       >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY"        >> "$GITHUB_OUTPUT"
+          echo "Releasing version $VERSION (tag v$VERSION, dry_run=$DRY)"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Tests must pass before any state-mutating step.
+  # ──────────────────────────────────────────────────────────────────────
+  test:
+    name: Pre-release tests
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit tests/integration -v --tb=short
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Bump version in pyproject.toml (if needed) and create the git tag.
+  # Both operations are idempotent: re-running this job with the same
+  # version is a no-op.
+  # ──────────────────────────────────────────────────────────────────────
+  prepare-release:
+    name: Bump version + create tag
+    needs: [resolve, test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so we can resolve "previous tag" later.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git for the GitHub Actions bot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump pyproject.toml version (if needed)
+        env:
+          NEW_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          CUR=$(python3 -c "import tomllib;print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          if [[ "$CUR" == "$NEW_VERSION" ]]; then
+            echo "pyproject.toml already at $NEW_VERSION; no bump needed."
+            exit 0
+          fi
+          echo "Bumping pyproject.toml: $CUR → $NEW_VERSION"
+          # Quoted heredoc + os.environ — the version string never enters
+          # the Python source, so it can't accidentally inject f-string
+          # syntax or expression characters.
+          python3 - <<'PY'
+          import os, pathlib, re
+          new = os.environ["NEW_VERSION"]
+          p = pathlib.Path("pyproject.toml")
+          s = p.read_text()
+          s = re.sub(r'^version\s*=\s*"[^"]+"',
+                     f'version = "{new}"',
+                     s, count=1, flags=re.M)
+          p.write_text(s)
+          PY
+          git add pyproject.toml
+          # `[skip ci]` keeps push-triggered workflows (CI, version-matrix)
+          # from re-firing on the bot's commit; the release workflow
+          # itself is workflow_dispatch / tag-triggered and is unaffected.
+          git commit -m "chore: release v$NEW_VERSION [skip ci]"
+          git push origin HEAD:main
+
+      - name: Create + push tag
+        id: tag
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally; checking remote…"
+          fi
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists on origin — reusing it."
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+            echo "Tag $TAG pushed."
+          fi
+          echo "sha=$(git rev-parse "$TAG"^{})" >> "$GITHUB_OUTPUT"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Build sdist + wheel against the tagged commit.
+  # ──────────────────────────────────────────────────────────────────────
+  build:
+    name: Build sdist + wheel
+    needs: [resolve, test, prepare-release]
+    # `prepare-release` only runs on workflow_dispatch; on a tag push it's
+    # skipped, so we can't `needs:` it unconditionally. `always()`
+    # combined with explicit success-checks below handles both cases.
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.prepare-release.result == 'success'
+        || needs.prepare-release.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Always build from the tagged commit so the artifact and the
+          # release-page metadata agree on what's inside.
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: pip install --upgrade build
+
+      - name: Verify pyproject version matches the tag
+        env:
+          EXPECTED: ${{ needs.resolve.outputs.version }}
+        run: |
+          ACTUAL=$(python3 -c "import tomllib;print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "::error::pyproject.toml version $ACTUAL does not match tag version $EXPECTED"
+            exit 1
+          fi
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify both sdist and wheel were produced
+        run: |
+          ls -la dist/
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)" || (echo '::error::sdist missing'; exit 1)
+          test -n "$(ls dist/*.whl 2>/dev/null)"    || (echo '::error::wheel missing'; exit 1)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────────────
+  # GitHub Release page — auto-generated notes from commit history,
+  # sdist + wheel attached as release assets.
+  # ──────────────────────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate release notes
+        id: notes
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV=$(git tag --list 'v*' --sort=-v:refname \
+                   | grep -v "^${TAG}$" | head -1 || true)
+
+          {
+            echo "## What's changed"
+            echo
+            if [[ -n "$PREV" ]]; then
+              echo "Commits since [\`$PREV\`](https://github.com/${GITHUB_REPOSITORY}/releases/tag/$PREV):"
+              echo
+              git log --pretty=format:"- %s (%h)" "$PREV..$TAG"
+            else
+              echo "Initial release."
+              echo
+              git log --pretty=format:"- %s (%h)" "$TAG" | head -30
+            fi
+
+            echo
+            echo
+            echo "## Install"
+            echo
+            echo '```bash'
+            echo "pip install druid-to-pinot-migrator==${{ needs.resolve.outputs.version }}"
+            echo '```'
+
+            if [[ -n "$PREV" ]]; then
+              echo
+              echo "**Full diff:** https://github.com/${GITHUB_REPOSITORY}/compare/$PREV...$TAG"
+            fi
+          } > release_notes.md
+
+          echo "Wrote release_notes.md ($(wc -l <release_notes.md) lines)"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: ${{ needs.resolve.outputs.tag }}
+          body_path: release_notes.md
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          # Don't auto-mark prereleases as latest, but tag a stable
+          # release as latest so the "Releases" tab surfaces it.
+          make_latest: ${{ !contains(needs.resolve.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.resolve.outputs.version, '-') }}
+          draft: false
+          fail_on_unmatched_files: true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # PyPI publish — uses the PYPI_TOKEN repo secret.
+  # `skip-existing` makes re-runs idempotent (transient PyPI failures).
+  # ──────────────────────────────────────────────────────────────────────
+  pypi-publish:
+    name: Publish to PyPI
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    if: needs.resolve.outputs.dry_run != 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: true
+          verbose: true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Summary — consolidates outcomes into a single step that branch
+  # protection can require.
+  # ──────────────────────────────────────────────────────────────────────
+  summary:
+    name: Release summary
+    if: always()
+    needs: [resolve, build, github-release, pypi-publish]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          {
+            echo "# Release ${{ needs.resolve.outputs.tag }}"
+            echo
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Build           | ${{ needs.build.result }} |"
+            echo "| GitHub Release  | ${{ needs.github-release.result }} |"
+            echo "| PyPI publish    | ${{ needs.pypi-publish.result }} |"
+            echo
+            if [[ "${{ needs.build.result }}" == "success" \
+               && "${{ needs.github-release.result }}" == "success" \
+               && ( "${{ needs.pypi-publish.result }}" == "success" \
+                  || "${{ needs.pypi-publish.result }}" == "skipped" ) ]]; then
+              echo "✅ Release complete."
+              echo
+              echo "- GitHub: https://github.com/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}"
+              if [[ "${{ needs.pypi-publish.result }}" == "success" ]]; then
+                echo "- PyPI:   https://pypi.org/project/druid-to-pinot-migrator/${{ needs.resolve.outputs.version }}/"
+                echo
+                echo '```bash'
+                echo "pip install druid-to-pinot-migrator==${{ needs.resolve.outputs.version }}"
+                echo '```'
+              fi
+            else
+              echo "❌ Release failed."
+              exit 1
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

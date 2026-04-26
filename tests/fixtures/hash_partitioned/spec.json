@@ -1,0 +1,48 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "orders",
+      "timestampSpec": {
+        "column": "order_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "order_id",
+          "customer_id",
+          "product_id",
+          "status"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "order_count"},
+        {"type": "doubleSum", "name": "total_amount", "fieldName": "amount"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "uris": ["s3://data-bucket/orders/"]
+      },
+      "inputFormat": {"type": "json"}
+    },
+    "tuningConfig": {
+      "type": "index_parallel",
+      "partitionsSpec": {
+        "type": "hashed",
+        "numShards": 4,
+        "partitionDimensions": ["customer_id", "product_id"]
+      },
+      "maxNumConcurrentSubTasks": 4
+    }
+  }
+}

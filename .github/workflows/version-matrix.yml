@@ -1,0 +1,175 @@
+name: Version Matrix (Live Docker)
+
+# Runs the live Druid → Pinot integration suite across a curated matrix of
+# Druid and Pinot versions to validate the compatibility table in the README.
+#
+# Each matrix cell:
+#   1. Boots Druid + Pinot (specified versions) via docker compose
+#   2. Runs tests/docker/test_live_migration.py end-to-end
+#   3. Tears down the cluster
+#
+# Triggers
+#   • weekly cron — Mondays 06:00 UTC
+#   • manual dispatch — optionally restricted to a single (druid, pinot) cell
+#   • on push to main when a CI-relevant file changes (compose, generators,
+#     live tests)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      druid_version:
+        description: "Druid version to test (leave blank for full matrix)"
+        required: false
+        default: ""
+      pinot_version:
+        description: "Pinot version to test (leave blank for full matrix)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "tests/docker/**"
+      - "migrator/pinot/**"
+      - "migrator/druid/**"
+      - "migrator/realtime/**"
+      - ".github/workflows/version-matrix.yml"
+      - "examples/quickstart/docker-compose.yml"
+
+concurrency:
+  group: version-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────
+  # Build the matrix dynamically so manual dispatch can pin a single cell.
+  # ────────────────────────────────────────────────────────────────────────
+  build-matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        shell: bash
+        env:
+          INPUT_DRUID: ${{ github.event.inputs.druid_version }}
+          INPUT_PINOT: ${{ github.event.inputs.pinot_version }}
+        run: |
+          # Curated combinations exercising the README compatibility matrix:
+          #   - current/current (primary)
+          #   - current Druid x older Pinot (artifact still deploys)
+          #   - older Druid x current Pinot (parser still understands spec)
+          #   - lower-bound smoke
+          read -r -d '' FULL <<'JSON' || true
+          {
+            "include": [
+              {"druid": "31.0.0",  "pinot": "1.5.0", "label": "current/current"},
+              {"druid": "31.0.0",  "pinot": "1.4.0", "label": "druid31/pinot14"},
+              {"druid": "30.0.0",  "pinot": "1.5.0", "label": "druid30/pinot15"},
+              {"druid": "28.0.1",  "pinot": "1.0.0", "label": "lower-bound"}
+            ]
+          }
+          JSON
+          if [[ -n "$INPUT_DRUID" || -n "$INPUT_PINOT" ]]; then
+            DRUID="${INPUT_DRUID:-31.0.0}"
+            PINOT="${INPUT_PINOT:-1.5.0}"
+            MATRIX=$(jq -nc --arg d "$DRUID" --arg p "$PINOT" \
+              '{include: [{druid: $d, pinot: $p, label: ($d + "/" + $p)}]}')
+          else
+            MATRIX=$(printf '%s' "$FULL" | jq -c .)
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Resolved matrix: $MATRIX"
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Live Druid + Pinot integration tests for each (druid, pinot) cell.
+  # ────────────────────────────────────────────────────────────────────────
+  live:
+    name: ${{ matrix.label }} — D${{ matrix.druid }} P${{ matrix.pinot }}
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-matrix.outputs.matrix) }}
+    env:
+      DRUID_VERSION: ${{ matrix.druid }}
+      PINOT_VERSION: ${{ matrix.pinot }}
+      LIVE_DOCKER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # GitHub runners ship with ~25GB of pre-installed software; the
+          # combined Druid + Pinot images need ~5GB. Free up disk so pulls
+          # don't fail mid-job.
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af --volumes >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Pull Druid + Pinot images
+        run: |
+          docker pull "apache/druid:${DRUID_VERSION}"
+          docker pull "apachepinot/pinot:${PINOT_VERSION}"
+
+      - name: Run live integration suite
+        # Pinot's ingestFromFile API is async — segments may take 60-300s to
+        # become queryable depending on runner load. We retry failed tests
+        # twice with a short delay to absorb that variance without masking
+        # genuine breakage.
+        run: pytest tests/docker -v --tb=short --reruns 2 --reruns-delay 10
+        env:
+          DRUID_VERSION: ${{ matrix.druid }}
+          PINOT_VERSION: ${{ matrix.pinot }}
+          LIVE_DOCKER_TESTS: "1"
+
+      - name: Cluster diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== docker ps ==="
+          docker ps -a
+          echo
+          echo "=== Druid coordinator logs (last 200 lines) ==="
+          docker logs --tail=200 migtest-coordinator 2>&1 || true
+          echo
+          echo "=== Pinot controller logs (last 200 lines) ==="
+          docker logs --tail=200 migtest-pinot-controller 2>&1 || true
+          echo
+          echo "=== Pinot server logs (last 200 lines) ==="
+          docker logs --tail=200 migtest-pinot-server 2>&1 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          ( cd tests/docker && docker compose down -v --remove-orphans ) || true
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Aggregate matrix result so branch protection can require a single check.
+  # ────────────────────────────────────────────────────────────────────────
+  matrix-result:
+    name: Matrix result
+    if: always()
+    needs: live
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ needs.live.result }}" != "success" ]]; then
+            echo "One or more cells failed: ${{ needs.live.result }}"
+            exit 1
+          fi
+          echo "All matrix cells passed."

@@ -1,0 +1,47 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "pageviews",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "region",
+          "platform",
+          "page",
+          "user_id"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "events"},
+        {"type": "longSum",   "name": "session_ms_sum",  "fieldName": "session_ms"},
+        {"type": "longSum",   "name": "bytes_sent_sum",  "fieldName": "bytes_sent"},
+        {"type": "longMax",   "name": "session_ms_max",  "fieldName": "session_ms"},
+        {"type": "longMin",   "name": "bytes_sent_min",  "fieldName": "bytes_sent"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "HOUR",
+        "rollup": true,
+        "intervals": ["2024-01-01/2024-01-08"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/quickstart-data",
+        "filter": "pageviews.json"
+      },
+      "inputFormat": {"type": "json"}
+    },
+    "tuningConfig": {
+      "type": "index_parallel",
+      "maxNumConcurrentSubTasks": 1
+    }
+  }
+}

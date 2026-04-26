@@ -1,0 +1,316 @@
+version: "3.8"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Druid + Pinot live migration integration test stack
+# ─────────────────────────────────────────────────────────────────────────────
+# Ports (host-side, chosen to avoid conflicts with dev instances):
+#   ZooKeeper:         12181
+#   Druid coordinator: 18081
+#   Druid broker:      18082
+#   Druid router:      18888
+#   Pinot controller:  19000
+#   Pinot broker:      18099
+#   Postgres:          15432
+# ─────────────────────────────────────────────────────────────────────────────
+
+volumes:
+  metadata_data: {}
+  druid_shared: {}
+  coordinator_var: {}
+  historical_var: {}
+  broker_var: {}
+  middlemanager_var: {}
+  router_var: {}
+  pinot_controller_data: {}
+
+networks:
+  migtest:
+    driver: bridge
+
+services:
+  # ── ZooKeeper (shared by Druid and Pinot) ─────────────────────────────────
+  zookeeper:
+    image: zookeeper:3.9.5
+    container_name: migtest-zookeeper
+    ports:
+      - "12181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_4LW_COMMANDS_WHITELIST: "ruok,stat,srvr"
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w2 localhost 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Kafka (KRaft single-node, no ZK dependency) ──────────────────────────
+  # Used for the realtime migration tests (Druid Kafka indexing supervisor +
+  # Pinot REALTIME ingestion in the same flow). Default port 19092 published
+  # to the host so tests can produce messages directly.
+  #
+  # Uses the official `apache/kafka` image (the previously-popular
+  # `bitnami/kafka` was migrated to `bitnamilegacy/kafka` in 2025; the
+  # official image is the maintained replacement).
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: migtest-kafka
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+    networks:
+      - migtest
+    mem_limit: 768m
+    # Healthcheck via the kafka-topics CLI shipped in the image. The image
+    # ships /opt/kafka/bin/ in PATH for the kafka user; we run `--list`
+    # against the bootstrap server which exits cleanly once the broker is
+    # accepting metadata requests.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Postgres (Druid metadata) ──────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: migtest-postgres
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_PASSWORD: druid
+      POSTGRES_USER: druid
+      POSTGRES_DB: druid
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U druid"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── Druid Coordinator ─────────────────────────────────────────────────────
+  coordinator:
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
+    container_name: migtest-coordinator
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "18081:8081"
+    command: coordinator
+    env_file:
+      - druid.env
+    volumes:
+      - druid_shared:/opt/shared
+      - coordinator_var:/opt/druid/var
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/status/health | grep -q true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Druid Broker ──────────────────────────────────────────────────────────
+  broker:
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
+    container_name: migtest-broker
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    ports:
+      - "18082:8082"
+    command: broker
+    env_file:
+      - druid.env
+    volumes:
+      - druid_shared:/opt/shared
+      - broker_var:/opt/druid/var
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/status/health | grep -q true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Druid Historical ──────────────────────────────────────────────────────
+  historical:
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
+    container_name: migtest-historical
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    ports:
+      - "18083:8083"
+    command: historical
+    env_file:
+      - druid.env
+    volumes:
+      - druid_shared:/opt/shared
+      - historical_var:/opt/druid/var
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/status/health | grep -q true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Druid MiddleManager (indexing) ────────────────────────────────────────
+  middlemanager:
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
+    container_name: migtest-middlemanager
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    ports:
+      - "18091:8091"
+    command: middleManager
+    env_file:
+      - druid.env
+    volumes:
+      - druid_shared:/opt/shared
+      - middlemanager_var:/opt/druid/var
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8091/status/health | grep -q true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Druid Router (SQL + unified API) ──────────────────────────────────────
+  router:
+    image: apache/druid:${DRUID_VERSION:-31.0.0}
+    container_name: migtest-router
+    depends_on:
+      broker:
+        condition: service_healthy
+      historical:
+        condition: service_healthy
+      middlemanager:
+        condition: service_healthy
+    ports:
+      - "18888:8888"
+    command: router
+    env_file:
+      - druid.env
+    volumes:
+      - druid_shared:/opt/shared
+      - router_var:/opt/druid/var
+    networks:
+      - migtest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8888/status/health | grep -q true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Pinot Controller ──────────────────────────────────────────────────────
+  pinot-controller:
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
+    container_name: migtest-pinot-controller
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "19000:9000"
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx1g -XX:+UseG1GC"
+    command: >
+      StartController
+      -zkAddress zookeeper:2181
+      -clusterName migtest-pinot
+      -controllerPort 9000
+      -dataDir /var/pinot/controller
+    volumes:
+      - pinot_controller_data:/var/pinot/controller
+    networks:
+      - migtest
+    mem_limit: 1500m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Pinot Broker ──────────────────────────────────────────────────────────
+  pinot-broker:
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
+    container_name: migtest-pinot-broker
+    depends_on:
+      pinot-controller:
+        condition: service_healthy
+    ports:
+      - "18099:8099"
+    environment:
+      JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseG1GC"
+    command: >
+      StartBroker
+      -zkAddress zookeeper:2181
+      -clusterName migtest-pinot
+    networks:
+      - migtest
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8099/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Pinot Server ──────────────────────────────────────────────────────────
+  pinot-server:
+    image: apachepinot/pinot:${PINOT_VERSION:-1.5.0}
+    container_name: migtest-pinot-server
+    depends_on:
+      pinot-controller:
+        condition: service_healthy
+    ports:
+      - "18097:8097"
+      - "18098:8098"
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx1500m -XX:+UseG1GC"
+    command: >
+      StartServer
+      -zkAddress zookeeper:2181
+      -clusterName migtest-pinot
+    networks:
+      - migtest
+    mem_limit: 2g
+    healthcheck:
+      # Pinot server health is on the admin port (8097), not 8098
+      test: ["CMD-SHELL", "curl -sf http://localhost:8097/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s

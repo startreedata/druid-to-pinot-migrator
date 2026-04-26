@@ -1,0 +1,69 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "api_requests",
+      "timestampSpec": {
+        "column": "request_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "request_id",
+          "endpoint",
+          "method",
+          "user_id",
+          "tenant_id",
+          "client_ip",
+          "response_status"
+        ],
+        "dimensionExclusions": ["raw_headers", "raw_body"]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "request_count"},
+        {"type": "longSum", "name": "response_time_ms_sum", "fieldName": "response_time_ms"},
+        {"type": "longMax", "name": "response_time_ms_max", "fieldName": "response_time_ms"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": false,
+        "intervals": ["2024-01-01/2025-01-01"]
+      },
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "user_id",
+            "expression": "json_value(auth_context, '$.userId')"
+          },
+          {
+            "type": "expression",
+            "name": "tenant_id",
+            "expression": "json_value(auth_context, '$.tenantId')"
+          }
+        ]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": ["s3://api-logs-bucket/requests/"]
+      },
+      "inputFormat": {
+        "type": "json",
+        "flattenSpec": {
+          "useFieldDiscovery": false,
+          "fields": [
+            {"type": "path", "name": "user_id",    "expr": "$.auth_context.userId"},
+            {"type": "path", "name": "tenant_id",  "expr": "$.auth_context.tenantId"},
+            {"type": "path", "name": "client_ip",  "expr": "$.network.remoteAddress"},
+            {"type": "jq",   "name": "endpoint",   "expr": ".request.path | split(\"?\")[0]"}
+          ]
+        }
+      }
+    }
+  }
+}
