@@ -519,6 +519,10 @@ class DruidSupervisorClient:
                     "consumerProperties": {
                         "bootstrap.servers": bootstrap_servers,
                     },
+                    # Modern Druid (≥ 0.17) wants an `inputFormat` declared
+                    # at the ioConfig level instead of the legacy `parser`
+                    # in dataSchema.
+                    "inputFormat": {"type": "json"},
                     "useEarliestOffset": True,
                     "taskCount": 1,
                     "replicas": 1,
@@ -536,7 +540,13 @@ class DruidSupervisorClient:
             data=json.dumps(spec),
             timeout=30,
         )
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # Surface Druid's actual error body — much more useful than
+            # bare HTTPError("400 Bad Request") for debugging.
+            raise RuntimeError(
+                f"Druid supervisor submission failed: "
+                f"HTTP {r.status_code} {r.reason}\nbody: {r.text[:600]}"
+            )
         return r.json()["id"]
 
     def wait_for_offsets(
