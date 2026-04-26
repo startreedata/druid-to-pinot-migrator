@@ -95,6 +95,34 @@ class DruidOverlordClient:
         url = f"{self._url}/druid/indexer/v1/supervisor/{supervisor_id}"
         return self._json_get(url)
 
+    def list_supervisors(self) -> list[str]:
+        """List all active supervisor IDs known to the Overlord."""
+        url = f"{self._url}/druid/indexer/v1/supervisor"
+        ids = self._json_get(url)
+        if not isinstance(ids, list):
+            raise DruidOverlordError(
+                f"Unexpected /supervisor response shape: {type(ids).__name__}"
+            )
+        return ids
+
+    def find_supervisor_for_datasource(
+        self, datasource: str
+    ) -> str | None:
+        """
+        Return the supervisor ID whose spec ingests into the given
+        datasource, or None if no supervisor matches. Iterates the active
+        list and inspects each one's spec — N+1 cost, fine for typical
+        clusters with a handful of supervisors.
+        """
+        for sup_id in self.list_supervisors():
+            try:
+                spec = self.get_supervisor_spec(sup_id)
+            except DruidOverlordError:
+                continue
+            if _safe_get(spec, ["spec", "dataSchema", "dataSource"]) == datasource:
+                return sup_id
+        return None
+
     def get_supervisor_offsets(self, supervisor_id: str) -> KafkaOffsetMap:
         """
         Build a :class:`KafkaOffsetMap` for the given Kafka supervisor.

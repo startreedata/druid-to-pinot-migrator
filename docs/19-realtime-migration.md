@@ -67,6 +67,26 @@ and reproducible artifact generation.
 
 ## Step-by-step
 
+### 0. (Optional) Pull the Druid spec from your running cluster
+
+If you don't already have the Druid ingestion spec as a JSON file —
+common when the original spec was lost or you want the live one —
+recover it directly from the cluster:
+
+```bash
+dpm extract-spec \
+  --datasource     events \
+  --coordinator-url http://druid-coordinator:8081 \
+  --overlord-url    http://druid-overlord:8081 \
+  --out             druid-spec.json
+```
+
+When a Kafka/Kinesis supervisor is active for the datasource, the
+output is the live supervisor spec (high fidelity). Otherwise the
+extractor falls back to a best-effort batch reconstruction from
+`segmentMetadata` and emits explicit warnings about fields that
+cannot be recovered (e.g. `ioConfig.inputSource`).
+
 ### 1. Snapshot the watermark from Druid
 
 ```bash

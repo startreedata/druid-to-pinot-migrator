@@ -83,17 +83,23 @@ Requires Python 3.11+.
 ## Quick Start
 
 ```bash
+# Don't have a Druid spec on disk? Pull it from a running cluster:
+dpm extract-spec --datasource events \
+    --coordinator-url http://druid-coordinator:8081 \
+    --overlord-url    http://druid-overlord:8081 \
+    --out             druid-spec.json
+
 # Inspect a spec without generating any files
-dpm inspect tests/fixtures/raw_batch/spec.json
+dpm inspect druid-spec.json
 
 # Full generation into ./output/
-dpm generate tests/fixtures/rolled_up/spec.json --out ./output
+dpm generate druid-spec.json --out ./output
 
 # Validate spec only
-dpm validate tests/fixtures/raw_batch/spec.json
+dpm validate druid-spec.json
 
 # Validate spec and generated artifacts together
-dpm validate tests/fixtures/raw_batch/spec.json --generated-dir ./output
+dpm validate druid-spec.json --generated-dir ./output
 ```
 
 ## Commands
@@ -149,6 +155,32 @@ Validate a Druid spec and optionally validate generated artifacts.
 Options:
   --generated-dir PATH   Directory with generated Pinot artifacts
   --json                  Output validation report as JSON
+```
+
+### `dpm extract-spec`
+
+Reconstruct a Druid ingestion spec from a running cluster — useful when
+operators don't have the original spec file on hand. Two extraction
+paths, auto-detected:
+
+- **Stream**: if a Kafka/Kinesis supervisor matches the datasource, the
+  Overlord's `/supervisor/{id}` payload is fetched verbatim → high-fidelity
+  reconstruction.
+- **Batch**: falls back to building a best-effort `index_parallel` spec
+  from the Coordinator's `segmentMetadata` query. Fields that cannot be
+  recovered from running-cluster state (`ioConfig.inputSource`,
+  `transformSpec`, parser config) are emitted as placeholders with
+  explicit warnings.
+
+```
+Options:
+  --datasource          Druid datasource name (required)
+  --coordinator-url     Druid Coordinator base URL (default localhost:8081)
+  --broker-url          Druid Broker base URL (used for segmentMetadata; defaults to coordinator)
+  --overlord-url        Druid Overlord base URL (omit to force batch path)
+  --prefer              auto | stream | batch  (default auto)
+  --out                 Output JSON path (default druid-spec.json)
+  --json                Print spec to stdout instead of summary
 ```
 
 ### Hybrid (REALTIME + OFFLINE) commands

@@ -5,6 +5,7 @@ import typer
 from migrator.cli.commands import (
     backfill_batch,
     extract_offsets,
+    extract_spec,
     generate,
     inspect,
     normalize,
@@ -18,6 +19,8 @@ app.command("inspect")(inspect.command)
 app.command("normalize")(normalize.command)
 app.command("generate")(generate.command)
 app.command("validate")(validate.command)
+# Cluster-introspection commands
+app.command("extract-spec")(extract_spec.command)
 # Hybrid (REALTIME + OFFLINE) migration commands
 app.command("extract-offsets")(extract_offsets.command)
 app.command("plan-hybrid")(plan_hybrid.command)

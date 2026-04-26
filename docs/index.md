@@ -45,6 +45,8 @@ If you hit a risk or warning during migration, consult the
 | 18 | [Production Migration Checklist](18-production-checklist.md) | End-to-end | Pre/post migration verification |
 | 19 | [Realtime (Hybrid) Migration](19-realtime-migration.md) | Druid Kafka supervisor | Watermark extraction, hybrid OFFLINE+REALTIME plan, backfill |
 
+> **Don't have a Druid spec on disk?** Use `dpm extract-spec --datasource X --coordinator-url ... --overlord-url ...` to pull it from a running Druid cluster. Stream supervisors give a high-fidelity round-trip; batch datasources give a best-effort reconstruction with explicit "needs manual completion" warnings.
+
 ---
 
 ## Reference
