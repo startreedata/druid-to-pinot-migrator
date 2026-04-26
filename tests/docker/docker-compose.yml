@@ -49,36 +49,45 @@ services:
   # Used for the realtime migration tests (Druid Kafka indexing supervisor +
   # Pinot REALTIME ingestion in the same flow). Default port 19092 published
   # to the host so tests can produce messages directly.
+  #
+  # Uses the official `apache/kafka` image (the previously-popular
+  # `bitnami/kafka` was migrated to `bitnamilegacy/kafka` in 2025; the
+  # official image is the maintained replacement).
   kafka:
-    image: bitnami/kafka:3.7
+    image: apache/kafka:3.7.0
     container_name: migtest-kafka
     ports:
       - "19092:19092"
     environment:
-      KAFKA_CFG_NODE_ID: "1"
-      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
-      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:19092"
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "INTERNAL"
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
     networks:
       - migtest
     mem_limit: 768m
-    # Healthcheck deliberately uses nc (busybox-provided in bitnami images)
-    # rather than `kafka-broker-api-versions.sh`, which is heavier and was
-    # observed flaking under CI runner pressure. Kafka readiness for the
-    # actual realtime tests is double-checked from the test side via
-    # KafkaTestClient.wait_healthy().
+    # Healthcheck via the kafka-topics CLI shipped in the image. The image
+    # ships /opt/kafka/bin/ in PATH for the kafka user; we run `--list`
+    # against the bootstrap server which exits cleanly once the broker is
+    # accepting metadata requests.
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+      test:
+        - "CMD-SHELL"
+        - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 20
       start_period: 60s
 
   # ── Postgres (Druid metadata) ──────────────────────────────────────────────
