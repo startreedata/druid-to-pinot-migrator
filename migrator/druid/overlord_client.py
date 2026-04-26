@@ -204,15 +204,40 @@ def _resolve_watermark(payload: dict) -> tuple[int, str]:
         try:
             if isinstance(cand, (int, float)):
                 ts_ms = int(cand)
-                iso = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).isoformat()
-                return ts_ms, iso
+                return ts_ms, _to_pinot_iso(
+                    datetime.fromtimestamp(ts_ms / 1000, timezone.utc)
+                )
             if isinstance(cand, str):
                 # Druid usually emits ISO-8601 with 'Z'
                 dt = datetime.fromisoformat(cand.replace("Z", "+00:00"))
                 ts_ms = int(dt.timestamp() * 1000)
-                return ts_ms, dt.astimezone(timezone.utc).isoformat()
+                return ts_ms, _to_pinot_iso(dt.astimezone(timezone.utc))
         except (TypeError, ValueError):
             continue
     # Fallback: now() — operator should override via --watermark-iso
     now = datetime.now(timezone.utc)
-    return int(now.timestamp() * 1000), now.isoformat()
+    return int(now.timestamp() * 1000), _to_pinot_iso(now)
+
+
+def _to_pinot_iso(dt: datetime) -> str:
+    """
+    Format a UTC datetime as an ISO-8601 string Pinot's TIMESTAMP offset
+    criterion accepts on every supported version (Pinot 1.0 +).
+
+    Pinot's parser uses Java's ``Instant.parse``, which is strict:
+    - Must end in ``Z`` (no ``+00:00`` offset form)
+    - Fractional seconds must be 0, 3, 6, or 9 digits — but Pinot 1.0
+      and 1.1 are picky about digit count, so we settle on 3 (millis).
+
+    Python's ``datetime.isoformat()`` produces e.g.
+    ``"2024-04-25T22:00:00.123456+00:00"``, which Pinot 1.0 rejects with
+    ``Unknown initial offset value`` (it falls through to CUSTOM and the
+    Kafka stream consumer can't translate it).
+
+    This helper produces ``"2024-04-25T22:00:00.123Z"``.
+    """
+    return (
+        dt.astimezone(timezone.utc)
+          .isoformat(timespec="milliseconds")
+          .replace("+00:00", "Z")
+    )

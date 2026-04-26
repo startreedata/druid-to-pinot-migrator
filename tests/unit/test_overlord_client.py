@@ -176,3 +176,47 @@ class TestGetSupervisorOffsets:
         # No timestamp in payload, fallback to "now"
         assert m.watermark_ms > 0
         assert "T" in m.watermark_iso
+
+    def test_watermark_iso_uses_pinot_compatible_format(self, overlord_url):
+        # Pinot's TIMESTAMP offset criterion uses Java Instant.parse, which
+        # requires `…Z` (not `+00:00`) and 3-digit millisecond precision.
+        # Catch regressions here before they cost a CI matrix run.
+        import re
+
+        session = _MockSession({
+            f"{overlord_url}/druid/indexer/v1/supervisor/s/status":
+                _Resp(200, {
+                    "payload": {
+                        "topic": "t",
+                        "dataSource": "d",
+                        "latestOffsets": {"0": 1},
+                        "lastIngestedTimestamp": "2024-03-01T00:00:00.123Z",
+                    }
+                }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("s")
+        # Must end in Z, must have exactly 3-digit fractional seconds
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", m.watermark_iso
+        ), f"watermark_iso must be Pinot-compatible: got {m.watermark_iso!r}"
+
+    def test_watermark_iso_format_for_epoch_millis_payload(self, overlord_url):
+        import re
+
+        session = _MockSession({
+            f"{overlord_url}/druid/indexer/v1/supervisor/s/status":
+                _Resp(200, {
+                    "payload": {
+                        "topic": "t",
+                        "dataSource": "d",
+                        "latestOffsets": {"0": 1},
+                        "lastIngestedTimestamp": 1709251200456,
+                    }
+                }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("s")
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", m.watermark_iso
+        ), m.watermark_iso
