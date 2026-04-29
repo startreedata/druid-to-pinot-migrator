@@ -281,7 +281,7 @@ jobs:
           echo "Wrote release_notes.md ($(wc -l <release_notes.md) lines)"
 
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           name: ${{ needs.resolve.outputs.tag }}
