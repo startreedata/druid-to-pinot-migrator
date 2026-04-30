@@ -74,12 +74,18 @@ class DruidHttpSqlPager:
         end_iso: str,
         page_rows: int,
     ) -> Iterator[list[dict]]:
+        # Druid SQL TIMESTAMP literals require 'yyyy-MM-dd HH:mm:ss[.SSS]'
+        # format — not ISO 8601 with 'T'/'Z'. Convert.
+        def _druid_ts(s: str) -> str:
+            return s.replace("T", " ").rstrip("Z").rstrip()
+        start_druid = _druid_ts(start_iso)
+        end_druid = _druid_ts(end_iso)
         offset = 0
         while True:
             sql = (
                 f'SELECT * FROM "{datasource}" '
-                f"WHERE __time >= TIMESTAMP '{start_iso}' "
-                f"AND __time <  TIMESTAMP '{end_iso}' "
+                f"WHERE __time >= TIMESTAMP '{start_druid}' "
+                f"AND __time <  TIMESTAMP '{end_druid}' "
                 f"ORDER BY __time "
                 f"OFFSET {offset} ROWS FETCH NEXT {page_rows} ROWS ONLY"
             )
@@ -115,15 +121,10 @@ class PinotIngestFromFileSink:
 
         import requests
 
-        batch_cfg = {
-            "inputFormat": "json",
-            "recordReaderSpec": {
-                "dataFormat": "json",
-                "className": (
-                    "org.apache.pinot.plugin.inputformat.json.JSONRecordReader"
-                ),
-            },
-        }
+        # Pinot 1.5+ rejects nested JSON objects in batchConfigMapStr —
+        # the values must be primitives. The simple form below is auto-resolved
+        # by the controller using its default JSONRecordReader.
+        batch_cfg = {"inputFormat": "json"}
         url = (
             f"{self._url}/ingestFromFile?tableNameWithType={table_name}_OFFLINE"
             f"&batchConfigMapStr={urllib.parse.quote(json.dumps(batch_cfg))}"
