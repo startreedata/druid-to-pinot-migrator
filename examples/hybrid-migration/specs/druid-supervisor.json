@@ -1,0 +1,48 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "pageviews_hybrid",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "region",
+          "platform",
+          "page",
+          "user_id"
+        ]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "events"},
+        {"type": "longSum", "name": "session_ms_sum", "fieldName": "session_ms"},
+        {"type": "longSum", "name": "bytes_sent_sum", "fieldName": "bytes_sent"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "NONE",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "topic": "hybrid_events_topic",
+      "inputFormat": {"type": "json"},
+      "consumerProperties": {
+        "bootstrap.servers": "kafka:9092"
+      },
+      "useEarliestOffset": true,
+      "taskCount": 1,
+      "replicas": 1,
+      "taskDuration": "PT300S"
+    },
+    "tuningConfig": {
+      "type": "kafka",
+      "maxRowsInMemory": 25000,
+      "maxRowsPerSegment": 5000000
+    }
+  }
+}
