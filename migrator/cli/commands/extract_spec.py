@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from migrator.auth import AuthConfigError, session_from_env
 from migrator.druid.coordinator_client import (
     DruidCoordinatorClient,
     DruidCoordinatorError,
@@ -54,15 +55,45 @@ def command(
     json_output: bool = typer.Option(
         False, "--json", help="Print the extracted spec to stdout as JSON."
     ),
+    druid_auth: str | None = typer.Option(
+        None,
+        "--druid-auth",
+        help=(
+            "Druid auth: 'basic:user:pass', 'bearer:<token>', "
+            "'header:K=V[;header:K2=V2]', or 'none'. "
+            "Falls back to env DPM_DRUID_AUTH."
+        ),
+    ),
+    druid_ca: str | None = typer.Option(
+        None,
+        "--druid-ca",
+        help="Path to a CA bundle for Druid TLS. Falls back to env DPM_DRUID_CA.",
+    ),
+    druid_insecure: bool = typer.Option(
+        False,
+        "--druid-insecure",
+        help="Skip TLS verification when talking to Druid (use only for testing).",
+    ),
 ) -> None:
     """Reconstruct a Druid ingestion spec from a live Druid cluster."""
+    try:
+        druid_session = session_from_env(
+            "DRUID",
+            auth_value=druid_auth,
+            ca_bundle=druid_ca,
+            insecure=druid_insecure or None,
+        )
+    except AuthConfigError as exc:
+        typer.echo(f"Invalid --druid-auth: {exc}", err=True)
+        raise typer.Exit(code=2)
     coord = DruidCoordinatorClient(
         coordinator_url=coordinator_url,
         broker_url=broker_url,
+        session=druid_session,
     )
     overlord: DruidOverlordClient | None = None
     if overlord_url is not None:
-        overlord = DruidOverlordClient(overlord_url)
+        overlord = DruidOverlordClient(overlord_url, session=druid_session)
 
     prefer_arg: str | None
     if prefer in ("auto", ""):

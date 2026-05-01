@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 
+from migrator.auth import AuthConfigError, session_from_env
 from migrator.druid.overlord_client import DruidOverlordClient
 from migrator.realtime.offset_io import save_offset_map
 
@@ -24,9 +25,37 @@ def command(
     json_output: bool = typer.Option(
         False, "--json", help="Print the captured offset map to stdout as JSON."
     ),
+    druid_auth: str | None = typer.Option(
+        None,
+        "--druid-auth",
+        help=(
+            "Druid auth: 'basic:user:pass', 'bearer:<token>', "
+            "'header:K=V', or 'none'. Falls back to env DPM_DRUID_AUTH."
+        ),
+    ),
+    druid_ca: str | None = typer.Option(
+        None,
+        "--druid-ca",
+        help="Path to a CA bundle for Druid TLS. Falls back to env DPM_DRUID_CA.",
+    ),
+    druid_insecure: bool = typer.Option(
+        False,
+        "--druid-insecure",
+        help="Skip TLS verification when talking to Druid (use only for testing).",
+    ),
 ) -> None:
     """Snapshot Druid's per-partition Kafka offsets and watermark timestamp."""
-    client = DruidOverlordClient(overlord_url)
+    try:
+        druid_session = session_from_env(
+            "DRUID",
+            auth_value=druid_auth,
+            ca_bundle=druid_ca,
+            insecure=druid_insecure or None,
+        )
+    except AuthConfigError as exc:
+        typer.echo(f"Invalid --druid-auth: {exc}", err=True)
+        raise typer.Exit(code=2)
+    client = DruidOverlordClient(overlord_url, session=druid_session)
     offset_map = client.get_supervisor_offsets(supervisor_id)
     save_offset_map(offset_map, out)
     if json_output:
