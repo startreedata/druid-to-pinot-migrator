@@ -127,12 +127,31 @@ jobs:
           docker pull "apache/druid:${DRUID_VERSION}"
           docker pull "apachepinot/pinot:${PINOT_VERSION}"
 
-      - name: Run live integration suite
+      - name: Run live integration suite (no-auth)
         # Pinot's ingestFromFile API is async — segments may take 60-300s to
         # become queryable depending on runner load. We retry failed tests
         # twice with a short delay to absorb that variance without masking
         # genuine breakage.
-        run: pytest tests/docker -v --tb=short --reruns 2 --reruns-delay 10
+        # The `--ignore=tests/docker/auth` keeps the auth-enabled stack out
+        # of this step so the two compose stacks don't run simultaneously
+        # and double the runner's memory footprint.
+        run: |
+          pytest tests/docker \
+            --ignore=tests/docker/auth \
+            -v --tb=short --reruns 2 --reruns-delay 10
+        env:
+          DRUID_VERSION: ${{ matrix.druid }}
+          PINOT_VERSION: ${{ matrix.pinot }}
+          LIVE_DOCKER_TESTS: "1"
+
+      - name: Run live integration suite (auth-enabled)
+        # Brings up tests/docker/auth/docker-compose.yml on a separate set
+        # of ports. The session-scoped `auth_docker_stack` fixture handles
+        # the up/down — the previous step's no-auth stack has already been
+        # torn down by its own session-end fixture.
+        run: |
+          pytest tests/docker/auth \
+            -v --tb=short --reruns 2 --reruns-delay 10
         env:
           DRUID_VERSION: ${{ matrix.druid }}
           PINOT_VERSION: ${{ matrix.pinot }}
@@ -144,19 +163,21 @@ jobs:
           echo "=== docker ps ==="
           docker ps -a
           echo
-          echo "=== Druid coordinator logs (last 200 lines) ==="
-          docker logs --tail=200 migtest-coordinator 2>&1 || true
-          echo
-          echo "=== Pinot controller logs (last 200 lines) ==="
-          docker logs --tail=200 migtest-pinot-controller 2>&1 || true
-          echo
-          echo "=== Pinot server logs (last 200 lines) ==="
-          docker logs --tail=200 migtest-pinot-server 2>&1 || true
+          for container in migtest-coordinator migtest-pinot-controller \
+                           migtest-pinot-server authtest-coordinator \
+                           authtest-pinot-controller authtest-pinot-broker; do
+            if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then
+              echo "=== $container (last 200 lines) ==="
+              docker logs --tail=200 "$container" 2>&1 || true
+              echo
+            fi
+          done
 
       - name: Tear down
         if: always()
         run: |
-          ( cd tests/docker && docker compose down -v --remove-orphans ) || true
+          ( cd tests/docker        && docker compose down -v --remove-orphans ) || true
+          ( cd tests/docker/auth   && docker compose down -v --remove-orphans ) || true
 
   # ────────────────────────────────────────────────────────────────────────
   # Aggregate matrix result so branch protection can require a single check.

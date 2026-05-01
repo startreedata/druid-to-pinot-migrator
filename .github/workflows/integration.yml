@@ -1,0 +1,109 @@
+name: Integration (PR preflight)
+
+# PR-time live integration: brings up Druid + Pinot once at the
+# current/current cell (the most likely set users hit) and once with
+# auth enabled, runs the live test suite for each, and reports back
+# before the change can land. This is the fast-feedback complement to
+# `version-matrix.yml`, which runs the full multi-version cron and
+# main-push matrix.
+#
+# Triggers
+#   • on PR to main when a CI-relevant file changes (compose, generators,
+#     migrator/auth.py, live tests, this workflow)
+#   • on push to main with the same path filter (post-merge sanity)
+#   • manual dispatch
+#
+# Why a separate file (not folded into ci.yml):
+#   • ci.yml runs in ~30s and is set as a required check; the live
+#     integration is ~10min per cell so we keep it as an independent
+#     check that can be re-run / observed independently.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/docker/**"
+      - "migrator/**"
+      - "examples/**"
+      - ".github/workflows/integration.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tests/docker/**"
+      - "migrator/**"
+      - ".github/workflows/integration.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Live integration (Druid 31 + Pinot 1.5, no-auth + auth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      DRUID_VERSION: "31.0.0"
+      PINOT_VERSION: "1.5.0"
+      LIVE_DOCKER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af --volumes >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Pull Druid + Pinot images
+        run: |
+          docker pull "apache/druid:${DRUID_VERSION}"
+          docker pull "apachepinot/pinot:${PINOT_VERSION}"
+
+      # ── No-auth: full live migration suite ────────────────────────────
+      - name: Live integration suite (no-auth)
+        run: |
+          pytest tests/docker \
+            --ignore=tests/docker/auth \
+            -v --tb=short --reruns 2 --reruns-delay 10
+
+      # ── Auth-enabled: focused auth-path coverage ──────────────────────
+      - name: Live integration suite (auth-enabled)
+        run: |
+          pytest tests/docker/auth \
+            -v --tb=short --reruns 2 --reruns-delay 10
+
+      - name: Cluster diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== docker ps ==="
+          docker ps -a
+          echo
+          for container in migtest-coordinator migtest-pinot-controller \
+                           migtest-pinot-server authtest-coordinator \
+                           authtest-pinot-controller authtest-pinot-broker; do
+            if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then
+              echo "=== $container (last 200 lines) ==="
+              docker logs --tail=200 "$container" 2>&1 || true
+              echo
+            fi
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          ( cd tests/docker        && docker compose down -v --remove-orphans ) || true
+          ( cd tests/docker/auth   && docker compose down -v --remove-orphans ) || true
