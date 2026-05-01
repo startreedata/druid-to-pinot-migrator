@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 
+from migrator.auth import AuthConfigError, session_from_env
 from migrator.realtime.backfill_runner import (
     DruidHttpSqlPager,
     PinotIngestFromFileSink,
@@ -49,10 +50,62 @@ def command(
         help="Druid SQL paging size.",
         min=1,
     ),
+    druid_auth: str | None = typer.Option(
+        None,
+        "--druid-auth",
+        help=(
+            "Druid auth: 'basic:user:pass', 'bearer:<token>', "
+            "'header:K=V', or 'none'. Falls back to env DPM_DRUID_AUTH."
+        ),
+    ),
+    druid_ca: str | None = typer.Option(
+        None,
+        "--druid-ca",
+        help="Path to a CA bundle for Druid TLS. Falls back to env DPM_DRUID_CA.",
+    ),
+    druid_insecure: bool = typer.Option(
+        False,
+        "--druid-insecure",
+        help="Skip TLS verification when talking to Druid (use only for testing).",
+    ),
+    pinot_auth: str | None = typer.Option(
+        None,
+        "--pinot-auth",
+        help=(
+            "Pinot controller auth: 'basic:user:pass', 'bearer:<token>', "
+            "'header:K=V', or 'none'. Falls back to env DPM_PINOT_AUTH."
+        ),
+    ),
+    pinot_ca: str | None = typer.Option(
+        None,
+        "--pinot-ca",
+        help="Path to a CA bundle for Pinot TLS. Falls back to env DPM_PINOT_CA.",
+    ),
+    pinot_insecure: bool = typer.Option(
+        False,
+        "--pinot-insecure",
+        help="Skip TLS verification when talking to Pinot (use only for testing).",
+    ),
 ) -> None:
     """Move historical Druid data into a Pinot OFFLINE table."""
-    pager = DruidHttpSqlPager(druid_router)
-    sink = PinotIngestFromFileSink(pinot_controller)
+    try:
+        druid_session = session_from_env(
+            "DRUID",
+            auth_value=druid_auth,
+            ca_bundle=druid_ca,
+            insecure=druid_insecure or None,
+        )
+        pinot_session = session_from_env(
+            "PINOT",
+            auth_value=pinot_auth,
+            ca_bundle=pinot_ca,
+            insecure=pinot_insecure or None,
+        )
+    except AuthConfigError as exc:
+        typer.echo(f"Invalid auth config: {exc}", err=True)
+        raise typer.Exit(code=2)
+    pager = DruidHttpSqlPager(druid_router, session=druid_session)
+    sink = PinotIngestFromFileSink(pinot_controller, session=pinot_session)
     result = run_backfill(
         datasource=datasource,
         pinot_table=pinot_table,

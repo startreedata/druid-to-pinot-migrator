@@ -58,13 +58,21 @@ class DruidHttpSqlPager:
     but kept independent so production callers don't depend on test code.
     """
 
-    def __init__(self, router_url: str, *, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        router_url: str,
+        *,
+        timeout: float = 60.0,
+        session: "requests.Session | None" = None,
+    ) -> None:
         import requests
 
         self._url = router_url.rstrip("/")
         self._timeout = timeout
-        self._session = requests.Session()
-        self._session.headers.update({"Content-Type": "application/json"})
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+        self._session = session
 
     def page_rows(
         self,
@@ -112,9 +120,16 @@ class DruidHttpSqlPager:
 class PinotIngestFromFileSink:
     """Default sink: HTTPS POST to ``/ingestFromFile`` on the Pinot controller."""
 
-    def __init__(self, controller_url: str, *, timeout: float = 600.0) -> None:
+    def __init__(
+        self,
+        controller_url: str,
+        *,
+        timeout: float = 600.0,
+        session: "requests.Session | None" = None,
+    ) -> None:
         self._url = controller_url.rstrip("/")
         self._timeout = timeout
+        self._session = session  # may be None — created lazily in ingest_file
 
     def ingest_file(self, ndjson_path: str | Path, table_name: str) -> None:
         import urllib.parse
@@ -130,8 +145,11 @@ class PinotIngestFromFileSink:
             f"&batchConfigMapStr={urllib.parse.quote(json.dumps(batch_cfg))}"
         )
         path = Path(ndjson_path)
+        # multipart upload sets its own Content-Type; using a session is fine
+        # — requests strips the JSON Content-Type when `files=` is supplied.
+        post = self._session.post if self._session is not None else requests.post
         with path.open("rb") as fh:
-            resp = requests.post(
+            resp = post(
                 url,
                 files={"file": (path.name, fh, "application/octet-stream")},
                 timeout=self._timeout,
