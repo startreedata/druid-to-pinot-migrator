@@ -9,6 +9,7 @@ from migrator.cli.commands import (
     generate,
     inspect,
     normalize,
+    parity_check,
     plan_hybrid,
     validate,
 )
@@ -25,6 +26,8 @@ app.command("extract-spec")(extract_spec.command)
 app.command("extract-offsets")(extract_offsets.command)
 app.command("plan-hybrid")(plan_hybrid.command)
 app.command("backfill-batch")(backfill_batch.command)
+# Post-migration validation
+app.command("parity-check")(parity_check.command)
 
 
 def main() -> None:
