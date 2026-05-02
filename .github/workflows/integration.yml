@@ -1,0 +1,102 @@
+name: Integration (PR matrix)
+
+# PR-time live integration tests across the same certified version
+# matrix as `version-matrix.yml`. The two workflows differ only by
+# trigger:
+#   • integration.yml  → pull_request + manual (this file)
+#   • version-matrix.yml → cron + push-to-main + manual
+#
+# The actual cell runner is shared via the reusable workflow
+# `_live-cell.yml`, so any change to bring-up / tests / diagnostics
+# applies uniformly to both PR-time and scheduled runs.
+#
+# Cost note: the full 4-cell matrix on every PR is ~40 runner-minutes
+# (~10 min per cell, parallel). Path filters keep doc-only PRs from
+# triggering. If runner-minute budget becomes an issue, narrow the
+# matrix here to current/current only and let `version-matrix.yml`
+# carry the older-version coverage on cron.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/docker/**"
+      - "migrator/**"
+      - "examples/**"
+      - ".github/workflows/integration.yml"
+      - ".github/workflows/_live-cell.yml"
+  workflow_dispatch:
+    inputs:
+      druid_version:
+        description: "Druid version to test (leave blank for full matrix)"
+        required: false
+        default: ""
+      pinot_version:
+        description: "Pinot version to test (leave blank for full matrix)"
+        required: false
+        default: ""
+
+concurrency:
+  # Cancel superseded PR runs (rebases / force-pushes) to save runner
+  # minutes. The scheduled matrix uses a different concurrency group.
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-matrix:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        shell: bash
+        env:
+          INPUT_DRUID: ${{ github.event.inputs.druid_version }}
+          INPUT_PINOT: ${{ github.event.inputs.pinot_version }}
+        run: |
+          # Same curated cells as version-matrix.yml — keep in sync.
+          read -r -d '' FULL <<'JSON' || true
+          {
+            "include": [
+              {"druid": "31.0.0",  "pinot": "1.5.0", "label": "current/current"},
+              {"druid": "31.0.0",  "pinot": "1.4.0", "label": "druid31/pinot14"},
+              {"druid": "30.0.0",  "pinot": "1.5.0", "label": "druid30/pinot15"},
+              {"druid": "28.0.1",  "pinot": "1.0.0", "label": "lower-bound"}
+            ]
+          }
+          JSON
+          if [[ -n "$INPUT_DRUID" || -n "$INPUT_PINOT" ]]; then
+            DRUID="${INPUT_DRUID:-31.0.0}"
+            PINOT="${INPUT_PINOT:-1.5.0}"
+            MATRIX=$(jq -nc --arg d "$DRUID" --arg p "$PINOT" \
+              '{include: [{druid: $d, pinot: $p, label: ($d + "/" + $p)}]}')
+          else
+            MATRIX=$(printf '%s' "$FULL" | jq -c .)
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Resolved matrix: $MATRIX"
+
+  live:
+    needs: build-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/_live-cell.yml
+    with:
+      druid_version: ${{ matrix.druid }}
+      pinot_version: ${{ matrix.pinot }}
+      label: ${{ matrix.label }}
+
+  matrix-result:
+    name: Matrix result
+    if: always()
+    needs: live
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ needs.live.result }}" != "success" ]]; then
+            echo "One or more cells failed: ${{ needs.live.result }}"
+            exit 1
+          fi
+          echo "All matrix cells passed."
