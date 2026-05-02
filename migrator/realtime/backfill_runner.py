@@ -14,6 +14,7 @@ needing live clusters.
 
 from __future__ import annotations
 
+import datetime
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,6 +162,68 @@ class PinotIngestFromFileSink:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Time-column normalisation
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Druid SQL ``SELECT *`` returns the time column as ``__time`` (Druid's
+# internal name) typed as an ISO 8601 string. The Pinot schema's time
+# column is whatever the user named it (typically the original
+# ``timestampSpec.column`` — ``timestamp`` is dpm's generator default)
+# and is typed ``LONG/MILLISECONDS:EPOCH``.
+#
+# Without this normalisation step, Pinot would silently drop ``__time``
+# and the OFFLINE segment's ``[startTime, endTime]`` would collapse to
+# the single millisecond at which the segment was generated, breaking
+# hybrid-table time-boundary routing.
+#
+# The conversion is intentionally tolerant: numeric ``__time`` values
+# (which some Druid result formats produce) are passed through as-is.
+
+
+def _iso_to_millis(s: str) -> int:
+    """Convert a Druid SQL ISO 8601 timestamp into epoch milliseconds.
+
+    Druid's SQL layer emits ``"2026-04-23T00:15:22.967Z"`` (always UTC,
+    always millisecond-precision or below). This bypasses
+    ``datetime.fromisoformat`` so we keep working on Python 3.10 where
+    that builtin doesn't accept a trailing ``Z``.
+    """
+    s = s.rstrip("Z").replace("T", " ")
+    if "." in s:
+        head, frac = s.split(".")
+        # Pad / truncate to exactly 6 digits so ``%f`` is happy.
+        frac = (frac + "000000")[:6]
+        dt = datetime.datetime.strptime(
+            f"{head}.{frac}", "%Y-%m-%d %H:%M:%S.%f"
+        )
+    else:
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    dt = dt.replace(tzinfo=datetime.timezone.utc)
+    # int(...) truncates toward zero, which matches Druid's own behaviour
+    # when sub-millisecond precision is dropped.
+    return int(dt.timestamp() * 1000)
+
+
+def _normalize_time_column(row: dict, time_column: str) -> dict:
+    """Rename ``__time`` → ``time_column`` (in-place semantically).
+
+    Returns a row dict that's safe to JSON-serialise. The input dict is
+    not mutated when no rename is needed, so callers can still rely on
+    ``row is unchanged`` for performance-sensitive paths.
+    """
+    if time_column == "__time" or "__time" not in row:
+        return row
+    out = dict(row)
+    raw = out.pop("__time")
+    if isinstance(raw, str):
+        out[time_column] = _iso_to_millis(raw)
+    else:
+        # Already numeric (epoch ms) — pass through.
+        out[time_column] = raw
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -183,6 +246,7 @@ def run_backfill(
     pager: DruidSqlPager,
     sink: PinotIngestSink,
     page_rows: int = 50_000,
+    time_column: str = "timestamp",
 ) -> BackfillResult:
     """
     Page rows out of Druid for the watermark-bounded interval, write each
@@ -192,6 +256,11 @@ def run_backfill(
     The ``pager`` and ``sink`` arguments are dependency-injection seams —
     tests pass in stubs; real callers use ``DruidHttpSqlPager`` and
     ``PinotIngestFromFileSink``.
+
+    ``time_column`` is the Pinot schema's time column name (default
+    ``"timestamp"``, matching dpm's generator). Druid's ``__time`` column
+    is renamed to this name on each row, and ISO 8601 strings are
+    converted to epoch milliseconds.
     """
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
@@ -206,7 +275,8 @@ def run_backfill(
         page_path = staging / f"page-{pages_dumped:06d}.json"
         with page_path.open("w") as fh:
             for r in rows:
-                fh.write(json.dumps(r) + "\n")
+                normalized = _normalize_time_column(r, time_column)
+                fh.write(json.dumps(normalized) + "\n")
         paths.append(page_path)
         pages_dumped += 1
         rows_dumped += len(rows)
@@ -231,8 +301,13 @@ def dump_to_ndjson(
     staging_dir: str | Path,
     pager: DruidSqlPager,
     page_rows: int = 50_000,
+    time_column: str = "timestamp",
 ) -> Iterable[Path]:
-    """Page Druid → NDJSON files only (skip Pinot ingest). Yields each path."""
+    """Page Druid → NDJSON files only (skip Pinot ingest). Yields each path.
+
+    Applies the same ``__time`` → ``time_column`` rename as
+    ``run_backfill`` so the dumped files are directly ingestible by Pinot.
+    """
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
     n = 0
@@ -242,6 +317,7 @@ def dump_to_ndjson(
         page_path = staging / f"page-{n:06d}.json"
         with page_path.open("w") as fh:
             for r in rows:
-                fh.write(json.dumps(r) + "\n")
+                normalized = _normalize_time_column(r, time_column)
+                fh.write(json.dumps(normalized) + "\n")
         yield page_path
         n += 1

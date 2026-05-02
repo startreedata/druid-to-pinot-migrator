@@ -50,6 +50,16 @@ def command(
         help="Druid SQL paging size.",
         min=1,
     ),
+    time_column: str = typer.Option(
+        "timestamp",
+        "--time-column",
+        help=(
+            "Name of the Pinot schema's time column. Druid SQL exports the "
+            "time column as `__time` (ISO 8601 string); dpm renames it to "
+            "this name and converts it to epoch milliseconds before "
+            "ingest. The default 'timestamp' matches dpm's generated schema."
+        ),
+    ),
     druid_auth: str | None = typer.Option(
         None,
         "--druid-auth",
@@ -115,6 +125,7 @@ def command(
         pager=pager,
         sink=sink,
         page_rows=page_rows,
+        time_column=time_column,
     )
     typer.echo(
         f"Backfill complete: {result.rows_dumped} rows in {result.pages_dumped} "
