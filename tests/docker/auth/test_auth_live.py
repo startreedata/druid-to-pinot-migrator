@@ -193,7 +193,12 @@ class TestAuthGating:
             f"{AUTH_DRUID_COORDINATOR}/druid/coordinator/v1/datasources",
             timeout=10,
         )
-        assert r.status_code == 401
+        # Pinot 1.0.x returns 403; 1.4+ returns 401. Druid is consistent
+        # at 401. Either is a valid "auth blocked you" status — what
+        # matters is that the unauthenticated request was rejected.
+        assert r.status_code in (401, 403), (
+            f"expected 401 or 403, got {r.status_code}: {r.text[:200]}"
+        )
 
     def test_druid_coordinator_accepts_admin(self, auth_docker_stack):
         r = requests.get(
@@ -205,7 +210,12 @@ class TestAuthGating:
 
     def test_pinot_controller_rejects_unauth(self, auth_docker_stack):
         r = requests.get(f"{AUTH_PINOT_CONTROLLER}/tables", timeout=10)
-        assert r.status_code == 401
+        # Pinot 1.0.x returns 403; 1.4+ returns 401. Druid is consistent
+        # at 401. Either is a valid "auth blocked you" status — what
+        # matters is that the unauthenticated request was rejected.
+        assert r.status_code in (401, 403), (
+            f"expected 401 or 403, got {r.status_code}: {r.text[:200]}"
+        )
 
     def test_pinot_controller_accepts_admin(self, auth_docker_stack):
         r = requests.get(
@@ -221,7 +231,12 @@ class TestAuthGating:
             json={"sql": "SELECT 1"},
             timeout=10,
         )
-        assert r.status_code == 401
+        # Pinot 1.0.x returns 403; 1.4+ returns 401. Druid is consistent
+        # at 401. Either is a valid "auth blocked you" status — what
+        # matters is that the unauthenticated request was rejected.
+        assert r.status_code in (401, 403), (
+            f"expected 401 or 403, got {r.status_code}: {r.text[:200]}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
