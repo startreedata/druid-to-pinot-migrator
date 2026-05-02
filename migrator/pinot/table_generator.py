@@ -32,6 +32,61 @@ DEFAULT_OFFSET_RESET = "largest"
 Pinot default for new REALTIME tables."""
 
 
+def build_realtime_transform_configs(
+    canonical: CanonicalMigrationModel,
+) -> list[dict]:
+    """
+    Build the Pinot ``transformConfigs`` for a REALTIME table from the
+    canonical Druid metricsSpec.
+
+    Druid's ``metricsSpec`` declares pre-aggregated metric columns, e.g.
+
+        {"type": "count",   "name": "events"}
+        {"type": "longSum", "name": "session_ms_sum", "fieldName": "session_ms"}
+
+    Druid applies these aggregations at ingest time: a row with
+    ``session_ms=12345`` becomes a row with ``session_ms_sum=12345`` and
+    ``events=1``. dpm's generated Pinot schema follows Druid's lead and
+    declares the **stored** column names (``events``, ``session_ms_sum``).
+
+    But the raw Kafka stream still contains the *source* fields
+    (``session_ms``), not the rolled-up names. Without a Pinot ingestion
+    transform mapping raw → rolled, the REALTIME table receives 0 for
+    every metric (the rolled column has no matching JSON field, and the
+    source field has no matching schema column, so it's silently dropped).
+
+    This function emits exactly the right transformConfigs:
+
+    - ``count`` → ``{columnName: name, transformFunction: "1"}``
+    - any other metric where ``field_name`` differs from ``name`` →
+      ``{columnName: name, transformFunction: field_name}`` (alias copy)
+    - metrics where ``field_name`` is empty (or equal to ``name``) get no
+      transform — Druid's pass-through semantics.
+
+    Returns an empty list if no transforms are needed (e.g. no rollup,
+    or every metric's stored name matches its source field).
+    """
+    transforms: list[dict] = []
+    for m in canonical.metrics:
+        # ``count`` is special: there is no source field, every input row
+        # contributes 1 to the metric.
+        if m.druid_type.lower() == "count":
+            transforms.append({
+                "columnName": m.name,
+                "transformFunction": "1",
+            })
+            continue
+        # All other aggregations carry a source field name. Emit an alias
+        # only when the names differ (a Druid spec is allowed to use
+        # name == fieldName for pure rollup with no rename).
+        if m.field_name and m.field_name != m.name:
+            transforms.append({
+                "columnName": m.name,
+                "transformFunction": m.field_name,
+            })
+    return transforms
+
+
 def build_kafka_stream_configs(
     *,
     topic: str,
@@ -137,7 +192,7 @@ class PinotTableGenerator:
             offset_criteria=offset_criteria,
         )
 
-        return {
+        table: dict = {
             "tableName": table_name,
             "tableType": "REALTIME",
             "segmentsConfig": {
@@ -160,6 +215,18 @@ class PinotTableGenerator:
                 "customConfigs": {}
             },
         }
+
+        # transformConfigs map raw Kafka field names → rolled-up Druid metric
+        # column names so the REALTIME table actually receives metric values.
+        # Without this the realtime half ingests dimensions only and every
+        # SUM(events)/SUM(session_ms_sum) returns 0 until enough events
+        # accumulate to make the divergence obvious. Empty list = no rollup
+        # (or no rename) → no ingestionConfig key emitted.
+        transforms = build_realtime_transform_configs(canonical)
+        if transforms:
+            table["ingestionConfig"] = {"transformConfigs": transforms}
+
+        return table
 
     def generate(self, canonical: CanonicalMigrationModel) -> dict:
         """Generate the appropriate table config based on source kind."""
