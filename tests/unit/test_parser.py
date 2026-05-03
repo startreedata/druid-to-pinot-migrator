@@ -85,6 +85,100 @@ class TestDruidSpecParser:
         result = self.parser.parse(raw)
         assert result.parsed_spec.io_config.type == "kafka"
 
+    def test_kafka_iotype_falls_back_to_top_level_type(self):
+        """Druid itself accepts a Kafka supervisor spec without
+        ``ioConfig.type`` — it infers from the top-level task ``type``.
+        dpm should mirror that inference so users hand-writing
+        supervisor JSON aren't forced to repeat ``"type": "kafka"``
+        twice."""
+        raw = {
+            "type": "kafka",  # top-level
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "ds",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["d"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {"segmentGranularity": "HOUR", "rollup": False},
+                },
+                "ioConfig": {
+                    # NOTE: no "type": "kafka" here — Druid still accepts it.
+                    "topic": "events",
+                    "consumerProperties": {"bootstrap.servers": "kafka:9092"},
+                },
+            },
+        }
+        result = self.parser.parse(raw)
+        assert result.success
+        # Inferred from the top-level task type.
+        assert result.parsed_spec.io_config.type == "kafka"
+
+    def test_iotype_when_present_wins_over_top_level(self):
+        """If both top-level and ioConfig.type are present, ioConfig.type
+        wins (it's the more specific signal)."""
+        raw = {
+            "type": "kafka",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "ds",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["d"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {"segmentGranularity": "HOUR", "rollup": False},
+                },
+                "ioConfig": {
+                    "type": "kinesis",  # disagreeing inner type — wins
+                    "stream": "my-stream",
+                },
+            },
+        }
+        result = self.parser.parse(raw)
+        assert result.success
+        assert result.parsed_spec.io_config.type == "kinesis"
+
+    def test_top_level_kinesis_inferred(self):
+        """The same fallback works for Kinesis supervisors."""
+        raw = {
+            "type": "kinesis",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "ds",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["d"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {"segmentGranularity": "HOUR", "rollup": False},
+                },
+                "ioConfig": {
+                    "stream": "my-stream",
+                },
+            },
+        }
+        result = self.parser.parse(raw)
+        assert result.success
+        assert result.parsed_spec.io_config.type == "kinesis"
+
+    def test_no_top_level_no_inner_falls_back_to_index(self):
+        """Defensive: when neither side declares a type, default to the
+        legacy ``"index"`` (batch) — no behavioural change vs pre-fix."""
+        raw = {
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "ds",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["d"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {"segmentGranularity": "DAY", "rollup": False},
+                },
+                "ioConfig": {
+                    "inputSource": {"type": "local", "baseDir": "/data", "filter": "*.json"},
+                    "inputFormat": {"type": "json"},
+                },
+            },
+        }
+        result = self.parser.parse(raw)
+        assert result.success
+        assert result.parsed_spec.io_config.type == "index"
+
     def test_top_level_data_schema(self):
         """Support top-level dataSchema (not nested under spec)."""
         raw = {
