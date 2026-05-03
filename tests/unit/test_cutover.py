@@ -142,6 +142,11 @@ def cfg(tmp_path: Path) -> CutoverConfig:
         spec_path=spec_path,
         out_dir=tmp_path / "out",
         staging_dir=tmp_path / "staging",
+        # Stub clients can't actually report Pinot row counts, so the
+        # post-backfill settle wait would otherwise time out at 300s
+        # in every unit test. 0.5s is enough to exercise the code
+        # path without hanging.
+        backfill_settle_timeout_s=0.5,
     )
 
 
