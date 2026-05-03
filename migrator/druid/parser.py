@@ -89,9 +89,16 @@ class DruidSpecParser:
                 input_source = io_raw.get("inputSource", {})
                 if not input_source and io_raw.get("stream"):
                     input_source = {"type": "kinesis", "stream": io_raw["stream"]}
-                # Build a clean dict for DruidIoConfig, only using known fields
+                # Build a clean dict for DruidIoConfig, only using known fields.
+                # Druid itself accepts a Kafka/Kinesis supervisor spec without
+                # an explicit ``ioConfig.type`` — it infers from the top-level
+                # task ``type`` (``"kafka"`` / ``"kinesis"`` / etc.). Mirror
+                # that inference here so dpm classifies the same set of specs
+                # as ``stream`` that Druid does. ioConfig.type still wins
+                # when present.
+                inferred_type = io_raw.get("type") or raw.get("type") or "index"
                 io_known = {
-                    "type": io_raw.get("type", "index"),
+                    "type": inferred_type,
                     "inputSource": input_source,
                     "inputFormat": io_raw.get("inputFormat", {}),
                     "appendToExisting": io_raw.get("appendToExisting", False),
