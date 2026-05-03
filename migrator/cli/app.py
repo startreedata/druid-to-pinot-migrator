@@ -4,6 +4,7 @@ import typer
 
 from migrator.cli.commands import (
     backfill_batch,
+    deploy,
     extract_offsets,
     extract_spec,
     generate,
@@ -26,6 +27,8 @@ app.command("extract-spec")(extract_spec.command)
 app.command("extract-offsets")(extract_offsets.command)
 app.command("plan-hybrid")(plan_hybrid.command)
 app.command("backfill-batch")(backfill_batch.command)
+# Pinot-side deployment
+app.command("deploy")(deploy.command)
 # Post-migration validation
 app.command("parity-check")(parity_check.command)
 
