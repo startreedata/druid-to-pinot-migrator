@@ -43,6 +43,7 @@ from tests.docker.cluster_clients import (
     PINOT_BROKER_URL,
     PINOT_CONTROLLER_URL,
 )
+from tests.docker.migration_helper import ingest_records_into_pinot
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,9 +118,13 @@ def pageviews_state(druid, pinot, tmp_path_factory):
     pinot.create_table(table_offline)
 
     work = tmp_path_factory.mktemp("pv_v05_live")
-    pinot.add_segment(table_name=ds, records=records, schema=schema,
-                      tmp_dir=str(work))
-    pinot.wait_for_table_queryable(table_name=ds, timeout=180)
+    # Use the migration_helper ingest path that the other live tests
+    # use — it sends `{"inputFormat":"json"}` (the simple form Pinot
+    # 1.5+ accepts), not the nested recordReaderSpec form which 1.5
+    # rejects with a Jackson "Cannot deserialize String from Object"
+    # error.
+    ingest_records_into_pinot(pinot, ds, records, str(work))
+    pinot.wait_for_table_queryable(f"{ds}_OFFLINE", timeout=360)
 
     # ── A Druid spec to feed --from-canonical ─────────────────────────────
     spec = {
