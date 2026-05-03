@@ -18,12 +18,13 @@
 #   8. `dpm plan-hybrid` → OFFLINE + REALTIME table configs aligned at
 #      the watermark, with raw → rolled metric transformConfigs emitted
 #      by dpm itself (this was a manual override pre-v0.4.0).
-#   9. Deploy schemas + tables; REALTIME picks up at the watermark via
-#      Kafka offsetsForTimes.
+#   9. `dpm deploy` schemas + tables (was hand-written curl pre-v0.5.0);
+#      REALTIME picks up at the watermark via Kafka offsetsForTimes.
 #  10. `dpm backfill-batch --time-column timestamp` → pages Druid SQL
 #      into Pinot OFFLINE, with __time → timestamp rename + ISO→ms
 #      conversion done inside dpm itself (also pre-v0.4.0 workaround).
-#  11. Validate parity. Druid total == Pinot hybrid total.
+#  11. `dpm parity-check --from-canonical` (was a bespoke Python
+#      validator pre-v0.5.0). Druid total == Pinot hybrid total.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -139,13 +140,10 @@ rm -rf "$OUT_DIR/hybrid"
 # no longer needed.
 
 # ── 9. Deploy to Pinot ──────────────────────────────────────────────────────
-bold "[9/11] Deploying schema + OFFLINE + REALTIME to Pinot"
-curl -sS -X POST -H "Content-Type: application/json" \
-  --data @"$OUT_DIR/hybrid/schema.json" "$PINOT_CTRL/schemas" >/dev/null
-curl -sS -X POST -H "Content-Type: application/json" \
-  --data @"$OUT_DIR/hybrid/table-offline.json" "$PINOT_CTRL/tables" >/dev/null
-curl -sS -X POST -H "Content-Type: application/json" \
-  --data @"$OUT_DIR/hybrid/table-realtime.json" "$PINOT_CTRL/tables" >/dev/null
+bold "[9/11] dpm deploy (schema + OFFLINE + REALTIME → Pinot)"
+"${DPM[@]}" deploy \
+  --artifacts-dir "$OUT_DIR/hybrid" \
+  --pinot-controller "$PINOT_CTRL"
 
 cyan "  waiting for REALTIME to consume the 500 new events..."
 DEADLINE=$(( $(date +%s) + 180 ))
@@ -180,9 +178,12 @@ rm -rf "$STAGING_DIR"
 # data/fix_staging.py workaround is no longer needed.
 
 # ── 11. Validate parity ─────────────────────────────────────────────────────
-bold "[11/11] Validating Druid vs Pinot parity"
+bold "[11/11] dpm parity-check --from-canonical (Druid ↔ Pinot)"
 sleep 3
-python3 "$HERE/validate.py"
+"${DPM[@]}" parity-check \
+  --from-canonical "$HERE/specs/druid-supervisor.json" \
+  --druid-url "$DRUID_ROUTER" \
+  --pinot-broker "$PINOT_BROKER"
 
 bold "✓ Hybrid demo complete."
 cyan "  Druid Web Console:  $DRUID_ROUTER (browse via http://localhost:18888)"

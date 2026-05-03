@@ -52,24 +52,24 @@ What you'll see:
 [6/11] Capturing watermark via dpm extract-offsets
 [7/11] Producing 500 new events
 [8/11] dpm plan-hybrid
-[9/11] Deploying schema + OFFLINE + REALTIME to Pinot
+[9/11] dpm deploy (schema + OFFLINE + REALTIME → Pinot)
+  ✓ schema         pageviews_hybrid                         created
+  ✓ table-offline  pageviews_hybrid_OFFLINE                 created
+  ✓ table-realtime pageviews_hybrid_REALTIME                created
+
 [10/11] dpm backfill-batch (Druid history → Pinot OFFLINE)
-[11/11] Validating Druid vs Pinot parity
+[11/11] dpm parity-check --from-canonical (Druid ↔ Pinot)
+Parity check
+────────────────────────────────────────────────────────────
+  PASS  Total event count                        druid=1500  pinot=1500
+  PASS  SUM(session_ms_sum)                      druid=445768332  pinot=445768332.0
+  PASS  SUM(bytes_sent_sum)                      druid=73684277   pinot=73684277.0
+  PASS  events by region                         (4 groups)
+  PASS  events by platform                       (3 groups)
+  PASS  events by page                           (5 groups)
+  PASS  events by user_id                        (200 groups)
 
-=== HYBRID: pageviews_hybrid (1000 hist + 500 new = 1500 events) ===
-  PASS  Total event count                druid=1500  pinot=1500
-  PASS  SUM(events)                      druid=1500  pinot=1500
-  PASS  SUM(session_ms_sum)              druid=445768332  pinot=445768332
-  PASS  SUM(bytes_sent_sum)              druid=73684277   pinot=73684277
-  PASS  Distinct user_id (exact)         druid=200  pinot=200
-  PASS  MIN(timestamp)                   druid=…  pinot=…
-  PASS  MAX(timestamp)                   druid=…  pinot=…
-  PASS  events by region                 (4 groups)
-  PASS  events by platform               (3 groups)
-  PASS  session_ms_sum by page           (5 groups)
-  PASS  bytes_sent_sum by region         (4 groups)
-
-Result: 11 passed, 0 failed (out of 11)
+Result: 7 passed, 0 failed (out of 7)
 ```
 
 ## What's in this directory
@@ -80,9 +80,8 @@ examples/hybrid-migration/
 ├── run.sh                        # End-to-end driver
 ├── specs/
 │   └── druid-supervisor.json     # Druid Kafka supervisor (raw, no rollup)
-├── data/
-│   └── produce.py                # Event producer with `old` / `new` modes
-└── validate.py                   # Druid ↔ Pinot parity checks (11 cases)
+└── data/
+    └── produce.py                # Event producer with `old` / `new` modes
 ```
 
 ## The migration model
