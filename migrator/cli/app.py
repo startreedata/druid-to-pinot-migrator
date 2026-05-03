@@ -4,6 +4,7 @@ import typer
 
 from migrator.cli.commands import (
     backfill_batch,
+    cutover,
     deploy,
     extract_offsets,
     extract_spec,
@@ -31,6 +32,8 @@ app.command("backfill-batch")(backfill_batch.command)
 app.command("deploy")(deploy.command)
 # Post-migration validation
 app.command("parity-check")(parity_check.command)
+# End-to-end orchestration
+app.command("cutover")(cutover.command)
 
 
 def main() -> None:
