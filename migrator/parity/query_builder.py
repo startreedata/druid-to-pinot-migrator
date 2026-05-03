@@ -115,6 +115,16 @@ def _total_count_query(
     )
 
 
+# Pinot's broker defaults to LIMIT 10 on GROUP BY queries — silently
+# truncates results past the 10th group. Druid has no such default.
+# The auto-derived parity queries need a large explicit LIMIT on both
+# sides so a dimension with >10 distinct values doesn't produce a
+# false-positive divergence (Druid 30 groups vs Pinot 10 groups).
+# 1_000_000 is a reasonable safety ceiling — cardinalities above
+# that would be surprising in a parity-check workload anyway.
+_GROUPBY_LIMIT = 1_000_000
+
+
 def _groupby_count_query(
     canonical: CanonicalMigrationModel,
     dim_name: str,
@@ -136,13 +146,15 @@ def _groupby_count_query(
             f"SELECT {_q_druid(dim_name)}, {d_select} "
             f"FROM {_q_druid(druid_table)} "
             f"GROUP BY {_q_druid(dim_name)} "
-            f"ORDER BY {_q_druid(dim_name)}"
+            f"ORDER BY {_q_druid(dim_name)} "
+            f"LIMIT {_GROUPBY_LIMIT}"
         ),
         pinot=(
             f"SELECT {_q_pinot(dim_name)}, {p_select} "
             f"FROM {_q_pinot(pinot_table)} "
             f"GROUP BY {_q_pinot(dim_name)} "
-            f"ORDER BY {_q_pinot(dim_name)}"
+            f"ORDER BY {_q_pinot(dim_name)} "
+            f"LIMIT {_GROUPBY_LIMIT}"
         ),
         type="groupby",
     )

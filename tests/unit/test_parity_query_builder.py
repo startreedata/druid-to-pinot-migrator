@@ -183,6 +183,19 @@ class TestGroupByQueries:
         assert "events by region" in labels
         assert "events by tags" not in labels
 
+    def test_groupby_emits_explicit_large_limit_on_both_sides(self):
+        # Pinot's broker defaults to LIMIT 10 on GROUP BY queries —
+        # silently truncates past the 10th group. The auto-derived
+        # query needs an explicit large LIMIT on BOTH sides so a
+        # high-cardinality dimension doesn't produce a false-positive
+        # divergence (Druid 30 groups vs Pinot 10 groups). Live
+        # coverage in tests/docker/test_deploy_and_parity_live.py
+        # surfaced this on a 30-distinct-user_id dataset.
+        c = _model(dimensions=[_dim("user_id")])
+        gby = next(q for q in derive_queries_from_canonical(c) if q.type == "groupby")
+        assert "LIMIT 1000000" in gby.druid
+        assert "LIMIT 1000000" in gby.pinot
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # pinot_table override
