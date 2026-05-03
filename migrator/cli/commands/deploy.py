@@ -63,6 +63,19 @@ def command(
         "--pinot-insecure",
         help="Skip TLS verification when talking to Pinot (use only for testing).",
     ),
+    pinot_cert: str | None = typer.Option(
+        None,
+        "--pinot-cert",
+        help=(
+            "Client certificate for Pinot mTLS. Combined PEM, or the cert "
+            "half when --pinot-key is also given. Env DPM_PINOT_CERT."
+        ),
+    ),
+    pinot_key: str | None = typer.Option(
+        None,
+        "--pinot-key",
+        help="Client key for Pinot mTLS. Env DPM_PINOT_KEY.",
+    ),
 ) -> None:
     """Deploy Pinot schema + table configs to a controller via REST.
 
@@ -101,6 +114,8 @@ def command(
             auth_value=pinot_auth,
             ca_bundle=pinot_ca,
             insecure=pinot_insecure or None,
+            cert=pinot_cert,
+            key=pinot_key,
         )
     except AuthConfigError as exc:
         typer.echo(f"Invalid --pinot-auth: {exc}", err=True)

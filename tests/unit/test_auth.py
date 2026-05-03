@@ -199,3 +199,116 @@ def test_session_from_env_separate_prefixes(monkeypatch):
     assert druid.auth.username == "du"
     assert pinot.auth is None
     assert pinot.headers["Authorization"] == "Bearer ptok"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mTLS — --cert / --key
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtls:
+    def test_combined_pem(self, tmp_path):
+        # Single PEM containing both cert and key (the common
+        # `cat client.crt client.key > combined.pem` recipe).
+        pem = tmp_path / "combined.pem"
+        pem.write_text("dummy")
+        s = auth.configure_session(cert=str(pem))
+        # requests' contract: a string means a combined PEM file.
+        assert s.cert == str(pem)
+
+    def test_separate_cert_and_key(self, tmp_path):
+        cert = tmp_path / "client.crt"
+        key = tmp_path / "client.key"
+        cert.write_text("dummy")
+        key.write_text("dummy")
+        s = auth.configure_session(cert=str(cert), key=str(key))
+        # requests' contract: a tuple is (cert_file, key_file).
+        assert s.cert == (str(cert), str(key))
+
+    def test_key_without_cert_rejected(self, tmp_path):
+        key = tmp_path / "client.key"
+        key.write_text("dummy")
+        with pytest.raises(auth.AuthConfigError, match="key supplied without"):
+            auth.configure_session(key=str(key))
+
+    def test_no_mtls_when_neither_passed(self):
+        s = auth.configure_session()
+        # ``requests.Session.cert`` defaults to None; we don't touch it.
+        assert s.cert is None
+
+    def test_mtls_combines_with_basic_auth(self, tmp_path):
+        # Real-world common case: mTLS + basic auth on the same request.
+        # Both should land on the session.
+        cert = tmp_path / "c.pem"
+        cert.write_text("dummy")
+        s = auth.configure_session(
+            auth_value="basic:admin:secret", cert=str(cert),
+        )
+        assert s.cert == str(cert)
+        assert isinstance(s.auth, HTTPBasicAuth)
+        assert s.auth.username == "admin"
+
+    def test_mtls_combines_with_bearer(self, tmp_path):
+        cert = tmp_path / "c.pem"
+        cert.write_text("dummy")
+        s = auth.configure_session(
+            auth_value="bearer:tok", cert=str(cert),
+        )
+        assert s.cert == str(cert)
+        assert s.headers["Authorization"] == "Bearer tok"
+
+    def test_mtls_combines_with_ca_bundle(self, tmp_path):
+        # Independent: client cert (mTLS) for proving who we are,
+        # CA bundle for verifying the server. Different concerns.
+        cert = tmp_path / "client.pem"
+        ca = tmp_path / "ca.pem"
+        cert.write_text("dummy")
+        ca.write_text("dummy")
+        s = auth.configure_session(cert=str(cert), ca_bundle=str(ca))
+        assert s.cert == str(cert)
+        assert s.verify == str(ca)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Env-var fallback for cert/key
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtlsEnvVar:
+    def test_cert_via_env(self, monkeypatch, tmp_path):
+        cert = tmp_path / "c.pem"
+        cert.write_text("dummy")
+        monkeypatch.setenv("DPM_DRUID_CERT", str(cert))
+        s = auth.session_from_env("DRUID")
+        assert s.cert == str(cert)
+
+    def test_cert_and_key_via_env(self, monkeypatch, tmp_path):
+        cert = tmp_path / "c.pem"
+        key = tmp_path / "k.pem"
+        cert.write_text("dummy")
+        key.write_text("dummy")
+        monkeypatch.setenv("DPM_DRUID_CERT", str(cert))
+        monkeypatch.setenv("DPM_DRUID_KEY", str(key))
+        s = auth.session_from_env("DRUID")
+        assert s.cert == (str(cert), str(key))
+
+    def test_cli_cert_overrides_env(self, monkeypatch, tmp_path):
+        env_cert = tmp_path / "env.pem"
+        cli_cert = tmp_path / "cli.pem"
+        env_cert.write_text("dummy")
+        cli_cert.write_text("dummy")
+        monkeypatch.setenv("DPM_DRUID_CERT", str(env_cert))
+        s = auth.session_from_env("DRUID", cert=str(cli_cert))
+        assert s.cert == str(cli_cert)
+
+    def test_separate_prefixes_for_mtls(self, monkeypatch, tmp_path):
+        druid_cert = tmp_path / "druid.pem"
+        pinot_cert = tmp_path / "pinot.pem"
+        druid_cert.write_text("dummy")
+        pinot_cert.write_text("dummy")
+        monkeypatch.setenv("DPM_DRUID_CERT", str(druid_cert))
+        monkeypatch.setenv("DPM_PINOT_CERT", str(pinot_cert))
+        d = auth.session_from_env("DRUID")
+        p = auth.session_from_env("PINOT")
+        assert d.cert == str(druid_cert)
+        assert p.cert == str(pinot_cert)

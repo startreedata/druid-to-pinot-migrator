@@ -78,6 +78,19 @@ def command(
         "--druid-insecure",
         help="Skip TLS verification when talking to Druid (use only for testing).",
     ),
+    druid_cert: str | None = typer.Option(
+        None,
+        "--druid-cert",
+        help=(
+            "Client certificate for Druid mTLS. Combined PEM, or the cert "
+            "half when --druid-key is also given. Env DPM_DRUID_CERT."
+        ),
+    ),
+    druid_key: str | None = typer.Option(
+        None,
+        "--druid-key",
+        help="Client key for Druid mTLS. Env DPM_DRUID_KEY.",
+    ),
     pinot_auth: str | None = typer.Option(
         None,
         "--pinot-auth",
@@ -96,6 +109,19 @@ def command(
         "--pinot-insecure",
         help="Skip TLS verification when talking to Pinot (use only for testing).",
     ),
+    pinot_cert: str | None = typer.Option(
+        None,
+        "--pinot-cert",
+        help=(
+            "Client certificate for Pinot mTLS. Combined PEM, or the cert "
+            "half when --pinot-key is also given. Env DPM_PINOT_CERT."
+        ),
+    ),
+    pinot_key: str | None = typer.Option(
+        None,
+        "--pinot-key",
+        help="Client key for Pinot mTLS. Env DPM_PINOT_KEY.",
+    ),
 ) -> None:
     """Move historical Druid data into a Pinot OFFLINE table."""
     try:
@@ -104,12 +130,16 @@ def command(
             auth_value=druid_auth,
             ca_bundle=druid_ca,
             insecure=druid_insecure or None,
+            cert=druid_cert,
+            key=druid_key,
         )
         pinot_session = session_from_env(
             "PINOT",
             auth_value=pinot_auth,
             ca_bundle=pinot_ca,
             insecure=pinot_insecure or None,
+            cert=pinot_cert,
+            key=pinot_key,
         )
     except AuthConfigError as exc:
         typer.echo(f"Invalid auth config: {exc}", err=True)

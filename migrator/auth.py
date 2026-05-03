@@ -107,13 +107,25 @@ def configure_session(
     auth_value: str | None = None,
     ca_bundle: str | None = None,
     insecure: bool = False,
+    cert: str | None = None,
+    key: str | None = None,
 ) -> requests.Session:
     """Build a configured ``requests.Session`` from CLI/env values.
 
     The returned session is safe to inject into the existing client
     constructors (``DruidCoordinatorClient(session=...)`` etc.).
+
+    mTLS:
+      - Pass ``cert`` to a combined PEM file (cert + key concatenated).
+      - Pass both ``cert`` and ``key`` for separate PEM files.
+      - ``key`` without ``cert`` is a configuration error.
     """
     spec = parse_auth(auth_value)
+
+    if key and not cert:
+        raise AuthConfigError(
+            "client key supplied without a cert; mTLS requires both"
+        )
 
     session = requests.Session()
     # Preserve the prior default — every cluster client used to set this.
@@ -128,6 +140,10 @@ def configure_session(
     elif ca_bundle:
         session.verify = ca_bundle
 
+    if cert:
+        # requests' contract: tuple = (cert, key); plain str = combined PEM.
+        session.cert = (cert, key) if key else cert
+
     return session
 
 
@@ -137,19 +153,26 @@ def session_from_env(
     auth_value: str | None = None,
     ca_bundle: str | None = None,
     insecure: bool | None = None,
+    cert: str | None = None,
+    key: str | None = None,
 ) -> requests.Session:
     """Resolve auth/TLS settings from CLI args + env (CLI wins).
 
     ``prefix`` is the env-var prefix, e.g. ``"DRUID"`` reads
-    ``DPM_DRUID_AUTH`` / ``DPM_DRUID_CA`` / ``DPM_DRUID_INSECURE``.
+    ``DPM_DRUID_AUTH`` / ``DPM_DRUID_CA`` / ``DPM_DRUID_INSECURE`` /
+    ``DPM_DRUID_CERT`` / ``DPM_DRUID_KEY``.
     """
     eauth = os.environ.get(f"DPM_{prefix}_AUTH")
     eca = os.environ.get(f"DPM_{prefix}_CA")
     einsec = os.environ.get(f"DPM_{prefix}_INSECURE")
+    ecert = os.environ.get(f"DPM_{prefix}_CERT")
+    ekey = os.environ.get(f"DPM_{prefix}_KEY")
     return configure_session(
         auth_value=auth_value if auth_value is not None else eauth,
         ca_bundle=ca_bundle if ca_bundle is not None else eca,
         insecure=bool(insecure)
         if insecure is not None
         else (einsec is not None and einsec.lower() not in {"", "0", "false", "no"}),
+        cert=cert if cert is not None else ecert,
+        key=key if key is not None else ekey,
     )
