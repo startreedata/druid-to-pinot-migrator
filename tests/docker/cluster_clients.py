@@ -296,6 +296,12 @@ class PinotClient:
         """
         Use the Pinot controller ingestion endpoint to load a JSON file.
         This calls the /ingestFromFile API (available in Pinot 0.12+).
+
+        Pinot 1.5+ rejects nested JSON objects in ``batchConfigMapStr``
+        (the values must be primitives) — see PR #6 / #21 for the
+        downstream fixes that surfaced the constraint. The simple
+        ``{"inputFormat":"json"}`` form is sufficient: the controller
+        resolves the JSON record reader from its built-in registry.
         """
         if schema_name is None:
             schema_name = table_name
@@ -303,13 +309,7 @@ class PinotClient:
             f"{self.controller_url}/ingestFromFile"
             f"?tableNameWithType={table_name}_OFFLINE"
             f"&batchConfigMapStr="
-            + json.dumps({
-                "inputFormat": "json",
-                "recordReaderSpec": {
-                    "dataFormat": "json",
-                    "className": "org.apache.pinot.plugin.inputformat.json.JSONRecordReader",
-                },
-            })
+            + json.dumps({"inputFormat": "json"})
         )
         with open(file_path, "rb") as fh:
             r = requests.post(
