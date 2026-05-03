@@ -10,6 +10,7 @@ from migrator.auth import AuthConfigError, session_from_env
 from migrator.realtime.backfill_runner import (
     DruidHttpSqlPager,
     PinotIngestFromFileSink,
+    PinotIngestFromUriSink,
     run_backfill,
 )
 
@@ -122,6 +123,32 @@ def command(
         "--pinot-key",
         help="Client key for Pinot mTLS. Env DPM_PINOT_KEY.",
     ),
+    mode: str = typer.Option(
+        "ingest-from-file",
+        "--mode",
+        help=(
+            "Pinot ingestion mode:\n"
+            "  ingest-from-file (default): upload each NDJSON file body via\n"
+            "    multipart POST to /ingestFromFile. Simple but the file body\n"
+            "    travels through the controller — fine up to ~1M rows/page.\n"
+            "  ingest-from-uri: control-plane-only POST to /ingestFromURI;\n"
+            "    the Pinot controller pulls each file directly from a\n"
+            "    file:// URI. Requires the staging directory to be on a\n"
+            "    filesystem the controller can see (typically a shared\n"
+            "    Kubernetes volume). Scales much further than mode=ingest-from-file."
+        ),
+    ),
+    uri_prefix: str | None = typer.Option(
+        None,
+        "--uri-prefix",
+        help=(
+            "When --mode=ingest-from-uri, optionally override the URI scheme. "
+            "If unset, the sink emits file:// URIs against the staging dir's "
+            "absolute path. If set (e.g. 's3://my-bucket/staging/'), the "
+            "operator is responsible for uploading the staging files under "
+            "this prefix BEFORE running the ingest."
+        ),
+    ),
 ) -> None:
     """Move historical Druid data into a Pinot OFFLINE table."""
     try:
@@ -145,7 +172,19 @@ def command(
         typer.echo(f"Invalid auth config: {exc}", err=True)
         raise typer.Exit(code=2)
     pager = DruidHttpSqlPager(druid_router, session=druid_session)
-    sink = PinotIngestFromFileSink(pinot_controller, session=pinot_session)
+    if mode == "ingest-from-file":
+        sink = PinotIngestFromFileSink(pinot_controller, session=pinot_session)
+    elif mode == "ingest-from-uri":
+        sink = PinotIngestFromUriSink(
+            pinot_controller, session=pinot_session, uri_prefix=uri_prefix,
+        )
+    else:
+        typer.echo(
+            f"Invalid --mode {mode!r} (expected 'ingest-from-file' or "
+            f"'ingest-from-uri')",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     result = run_backfill(
         datasource=datasource,
         pinot_table=pinot_table,

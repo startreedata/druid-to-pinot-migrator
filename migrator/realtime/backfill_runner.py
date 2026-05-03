@@ -119,7 +119,17 @@ class DruidHttpSqlPager:
 
 
 class PinotIngestFromFileSink:
-    """Default sink: HTTPS POST to ``/ingestFromFile`` on the Pinot controller."""
+    """Default sink: HTTPS POST to ``/ingestFromFile`` on the Pinot controller.
+
+    Uploads the NDJSON file body via multipart/form-data — the data
+    travels controller-side, then Pinot builds a segment from it. Fine
+    for small backfills (≤ ~1M rows per page) but doesn't scale: the
+    file body is in-memory on the controller during the upload.
+
+    For larger datasets prefer ``PinotIngestFromUriSink``: control-plane
+    only, the controller pulls the data from a URI it can read directly
+    (file://, s3://, gs://). One round-trip per file regardless of size.
+    """
 
     def __init__(
         self,
@@ -158,6 +168,81 @@ class PinotIngestFromFileSink:
         if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Pinot ingestFromFile failed: {resp.status_code} {resp.text[:300]}"
+            )
+
+
+class PinotIngestFromUriSink:
+    """Streaming-style sink: HTTPS POST to ``/ingestFromURI``.
+
+    Unlike ``PinotIngestFromFileSink``, this is a **control-plane**
+    call — the dpm POST contains only the URI, not the data. The
+    Pinot controller reads the source file directly via the URI's
+    scheme (``file://``, ``s3://``, ``gs://`` — depending on which
+    PinotFS plugins are installed).
+
+    Use this for large backfills where uploading file bodies through
+    the controller would be wasteful or exceed the request-size limit.
+
+    URI translation:
+      - The pager hands the sink a local filesystem path
+        (e.g. ``/tmp/staging/page-000000.json``).
+      - The sink turns that into a URI the controller can resolve.
+      - Default: ``file://<absolute path>``. This works when the
+        staging directory is on a filesystem the controller can see
+        — typically a Kubernetes shared volume, or local-localhost.
+      - For object storage, pass a ``uri_prefix`` like
+        ``s3://my-bucket/staging/`` and arrange for the staging files
+        to be uploaded there *before* calling ``ingest_file``. The
+        sink will combine ``uri_prefix`` with the file's basename.
+
+    Each call is one HTTP round-trip — the data transfer happens on
+    the Pinot side, not over the dpm → controller link.
+    """
+
+    def __init__(
+        self,
+        controller_url: str,
+        *,
+        timeout: float = 600.0,
+        session: "requests.Session | None" = None,
+        uri_prefix: str | None = None,
+    ) -> None:
+        self._url = controller_url.rstrip("/")
+        self._timeout = timeout
+        self._uri_prefix = uri_prefix
+        if session is None:
+            import requests
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+        self._session = session
+
+    def _build_source_uri(self, path: Path) -> str:
+        if self._uri_prefix is None:
+            # Local file://; the controller must share a filesystem.
+            return path.resolve().as_uri()
+        # Object-store mode: caller has already uploaded file under the
+        # prefix; we reference it by basename.
+        prefix = self._uri_prefix.rstrip("/")
+        return f"{prefix}/{path.name}"
+
+    def ingest_file(self, ndjson_path: str | Path, table_name: str) -> None:
+        import urllib.parse
+
+        path = Path(ndjson_path)
+        source_uri = self._build_source_uri(path)
+        batch_cfg = {"inputFormat": "json"}
+
+        url = (
+            f"{self._url}/ingestFromURI"
+            f"?tableNameWithType={table_name}_OFFLINE"
+            f"&batchConfigMapStr={urllib.parse.quote(json.dumps(batch_cfg))}"
+            f"&sourceURIStr={urllib.parse.quote(source_uri)}"
+        )
+        resp = self._session.post(url, timeout=self._timeout)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Pinot ingestFromURI failed for {source_uri}: "
+                f"{resp.status_code} {resp.text[:300]}"
             )
 
 
