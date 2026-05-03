@@ -72,6 +72,12 @@ class CutoverConfig:
     backfill_end_iso: str | None = None  # defaults to the captured watermark
     backfill_page_rows: int = 50_000
     backfill_time_column: str = "timestamp"
+    # Pinot builds OFFLINE segments asynchronously after /ingestFromFile
+    # returns 200; the parity phase queries Pinot, so we have to wait
+    # for the segments to become queryable before running it. ``300s``
+    # covers the typical 30-300s ingest tail; tests can drop this to
+    # avoid hanging on stub clients.
+    backfill_settle_timeout_s: float = 300.0
     skip_deploy: bool = False
     skip_backfill: bool = False
     skip_parity: bool = False
@@ -290,6 +296,53 @@ def run_cutover(
                            f"pages ({time.time() - t0:.1f}s)",
                     artifact=str(staging),
                 )
+
+                # Pinot's /ingestFromFile (and /ingestFromURI) return
+                # 200 as soon as the controller queues the segment build,
+                # but the OFFLINE segment is asynchronously built and
+                # only becomes queryable some seconds-to-minutes later.
+                # Without this wait the parity phase queries Pinot too
+                # early and reports a (transient) divergence:
+                # ``druid=N pinot=0``.
+                # We poll until COUNT(*) on the OFFLINE table catches
+                # up with the rows the backfill dumped, or time out.
+                # Skipped when parity itself is skipped — no point
+                # waiting for data nothing will check.
+                if not cfg.skip_parity and pinot_sql_client is not None and bf.rows_dumped > 0:
+                    expected = bf.rows_dumped
+                    deadline = time.time() + cfg.backfill_settle_timeout_s
+                    last_seen = -1
+                    while time.time() < deadline:
+                        try:
+                            rows = pinot_sql_client.query(
+                                f'SELECT COUNT(*) FROM {cfg.pinot_table}_OFFLINE'
+                            )
+                            seen = int(rows[0][0]) if rows else 0
+                        except Exception:
+                            seen = -1
+                        if seen >= expected:
+                            break
+                        last_seen = seen
+                        # Don't oversleep past the deadline; capping here
+                        # keeps unit tests fast (small timeout) without
+                        # changing production behaviour (large timeout).
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(3.0, remaining))
+                    # Don't fail the run if we time out — parity-check
+                    # will surface the divergence with a more useful
+                    # error message than we could here. We just record
+                    # what we observed so the cutover-report.json
+                    # captures the wait outcome for forensics.
+                    if last_seen >= 0 and last_seen < expected:
+                        # Append a note onto the backfill step's detail
+                        # rather than emit a separate phase — the wait
+                        # is part of the backfill semantically.
+                        report.steps[-1].detail += (
+                            f"; pinot count plateaued at {last_seen}/"
+                            f"{expected} after 300s"
+                        )
             except Exception as exc:  # noqa: BLE001
                 _record("backfill", "error", detail=str(exc))
 
