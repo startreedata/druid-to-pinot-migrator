@@ -10,6 +10,7 @@ import pytest
 
 from migrator.realtime.backfill_runner import (
     BackfillResult,
+    PinotIngestFromUriSink,
     _iso_to_millis,
     _normalize_time_column,
     dump_to_ndjson,
@@ -287,3 +288,130 @@ class TestRunBackfillRenamesTime:
         page_path, _ = sink.received[0]
         record = json.loads(page_path.read_text().strip())
         assert record == {"region": "us-east", "v": 1}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PinotIngestFromUriSink — control-plane-only sink for large backfills
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeResp:
+    """Duck-typed `requests.Response` for sink tests."""
+
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class _SpySession:
+    """Records every POST and returns a canned response."""
+
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status = status
+        self.text = text
+        self.posts: list[tuple[str, dict]] = []
+        self.headers: dict[str, str] = {}
+
+    def post(self, url, *, timeout=None, **kwargs):
+        self.posts.append((url, kwargs))
+        return _FakeResp(self.status, self.text)
+
+
+class TestPinotIngestFromUriSink:
+    def test_emits_file_uri_when_no_prefix(self, tmp_path: Path):
+        # Default behaviour — turn the local path into a file:// URI.
+        page = tmp_path / "page-000000.json"
+        page.write_text("{}\n")
+        session = _SpySession()
+        sink = PinotIngestFromUriSink(
+            "http://pinot:9000", session=session,
+        )
+
+        sink.ingest_file(page, "ds")
+
+        assert len(session.posts) == 1
+        url, _ = session.posts[0]
+        # Endpoint and table-name encoding
+        assert "/ingestFromURI" in url
+        assert "tableNameWithType=ds_OFFLINE" in url
+        # Data is referenced by URI, not uploaded — no `files=` kwarg
+        # was passed to the session.
+        assert "sourceURIStr=" in url
+        # The URI is file:// against the absolute path.
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(url).query)
+        assert qs["sourceURIStr"][0].startswith("file://")
+        assert str(page.resolve()) in qs["sourceURIStr"][0]
+
+    def test_emits_prefixed_uri_when_prefix_given(self, tmp_path: Path):
+        # Object-store mode: the operator pre-uploads to the prefix; the
+        # sink references the file by basename.
+        page = tmp_path / "page-000000.json"
+        page.write_text("{}\n")
+        session = _SpySession()
+        sink = PinotIngestFromUriSink(
+            "http://pinot:9000",
+            session=session,
+            uri_prefix="s3://my-bucket/staging/",  # trailing slash tolerated
+        )
+
+        sink.ingest_file(page, "ds")
+
+        from urllib.parse import parse_qs, urlparse
+        url, _ = session.posts[0]
+        qs = parse_qs(urlparse(url).query)
+        # Trailing slash on prefix gets normalised; basename appended.
+        assert qs["sourceURIStr"][0] == "s3://my-bucket/staging/page-000000.json"
+
+    def test_does_not_upload_file_body(self, tmp_path: Path):
+        # The control-plane-only contract: dpm POSTs URL+query only, no
+        # body. Specifically, no `files=` (multipart upload) and no
+        # `data=` (raw body).
+        page = tmp_path / "page-000000.json"
+        page.write_text("{}\n")
+        session = _SpySession()
+        sink = PinotIngestFromUriSink("http://pinot:9000", session=session)
+
+        sink.ingest_file(page, "ds")
+
+        _, kwargs = session.posts[0]
+        assert "files" not in kwargs
+        assert "data" not in kwargs
+
+    def test_500_response_raises(self, tmp_path: Path):
+        page = tmp_path / "page.json"
+        page.write_text("{}\n")
+        session = _SpySession(status=500, text="boom")
+        sink = PinotIngestFromUriSink("http://pinot:9000", session=session)
+        with pytest.raises(RuntimeError, match="ingestFromURI failed"):
+            sink.ingest_file(page, "ds")
+
+    def test_ingest_files_via_run_backfill(self, tmp_path: Path):
+        # The orchestrator hands one file at a time to the sink; verify
+        # the URI sink integrates cleanly via that loop. The pager
+        # produces three pages, the sink should see three POSTs.
+        rows = [{"a": i} for i in range(7)]
+        pager = StubPager(rows)
+        session = _SpySession()
+        sink = PinotIngestFromUriSink("http://pinot:9000", session=session)
+
+        run_backfill(
+            datasource="ds",
+            pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager,
+            sink=sink,
+            page_rows=3,  # 7 rows / 3 = 3 pages (3, 3, 1)
+        )
+
+        assert len(session.posts) == 3
+        # Each POST references a distinct page-NNNNNN.json file.
+        from urllib.parse import parse_qs, urlparse
+        seen_uris = []
+        for url, _ in session.posts:
+            qs = parse_qs(urlparse(url).query)
+            seen_uris.append(qs["sourceURIStr"][0])
+        assert len(set(seen_uris)) == 3
+        assert all("page-" in u for u in seen_uris)
