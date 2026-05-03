@@ -74,6 +74,23 @@ def command(
         "--druid-insecure",
         help="Skip TLS verification when talking to Druid (use only for testing).",
     ),
+    druid_cert: str | None = typer.Option(
+        None,
+        "--druid-cert",
+        help=(
+            "Client certificate for mTLS. Combined PEM (cert+key), or "
+            "the cert half when --druid-key is also given. "
+            "Falls back to env DPM_DRUID_CERT."
+        ),
+    ),
+    druid_key: str | None = typer.Option(
+        None,
+        "--druid-key",
+        help=(
+            "Client key for mTLS (use with --druid-cert when cert+key "
+            "are in separate PEM files). Falls back to env DPM_DRUID_KEY."
+        ),
+    ),
 ) -> None:
     """Reconstruct a Druid ingestion spec from a live Druid cluster."""
     try:
@@ -82,6 +99,8 @@ def command(
             auth_value=druid_auth,
             ca_bundle=druid_ca,
             insecure=druid_insecure or None,
+            cert=druid_cert,
+            key=druid_key,
         )
     except AuthConfigError as exc:
         typer.echo(f"Invalid --druid-auth: {exc}", err=True)
