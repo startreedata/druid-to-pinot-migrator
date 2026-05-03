@@ -52,14 +52,15 @@ from tests.docker.cluster_clients import (
 
 
 @pytest.fixture(scope="module")
-def pageviews_state(
-    druid_datasource_factory, pinot_table_factory, pinot, tmp_path_factory,
-):
+def pageviews_state(druid, pinot, tmp_path_factory):
     """Ingest a small pageviews dataset into Druid + Pinot for the live tests.
 
-    Uses a separate datasource name (``pv_v05_live``) so this module's
-    tests don't trip over fixtures from the other live test files when
-    they happen to run in the same session.
+    Module-scoped so the two parity tests share the same ingested data
+    (the divergence test relies on the matching Pinot table from the
+    happy-path test). Cleanup is done in-fixture rather than via the
+    function-scoped ``druid_datasource_factory`` / ``pinot_table_factory``
+    — pytest disallows a module-scoped fixture from depending on a
+    function-scoped one.
     """
     ds = "pv_v05_live"
     records = []
@@ -72,16 +73,19 @@ def pageviews_state(
             "user_id": f"user_{i % 30}",
         })
 
-    druid_datasource_factory(
-        name=ds,
+    # ── Druid ─────────────────────────────────────────────────────────────
+    druid.ingest_inline(
+        datasource=ds,
         records=records,
         timestamp_col="timestamp",
+        timestamp_format="millis",
         dimensions=["region", "platform", "user_id"],
         metrics=[],
         rollup=False,
     )
+    druid.wait_for_datasource(ds, timeout=180)
 
-    # Construct + deploy a matching Pinot OFFLINE table with the same shape.
+    # ── Pinot schema + OFFLINE table ──────────────────────────────────────
     schema = {
         "schemaName": ds,
         "dateTimeFieldSpecs": [
@@ -109,18 +113,15 @@ def pageviews_state(
         "tableIndexConfig": {"loadMode": "MMAP"},
         "metadata": {"customConfigs": {}},
     }
-    pinot_table_factory(schema=schema, table_config=table_offline)
+    pinot.create_schema(schema)
+    pinot.create_table(table_offline)
 
-    # Push the same rows into Pinot using the existing helper that the
-    # other live test files already exercise (so this test inherits
-    # whatever Pinot-version compatibility quirks they handle).
     work = tmp_path_factory.mktemp("pv_v05_live")
     pinot.add_segment(table_name=ds, records=records, schema=schema,
                       tmp_dir=str(work))
     pinot.wait_for_table_queryable(table_name=ds, timeout=180)
 
-    # The Druid spec we'd hand to dpm in a real migration — used by the
-    # parity tests to auto-derive query lists.
+    # ── A Druid spec to feed --from-canonical ─────────────────────────────
     spec = {
         "type": "index_parallel",
         "spec": {
@@ -149,12 +150,30 @@ def pageviews_state(
     }
     spec_path = work / "spec.json"
     spec_path.write_text(json.dumps(spec))
-    return {
+
+    yield {
         "ds": ds,
         "pinot_table": ds,
         "row_count": len(records),
         "spec_path": spec_path,
     }
+
+    # ── teardown ──────────────────────────────────────────────────────────
+    # Best-effort: if Druid/Pinot are already torn down by the session
+    # fixture this just no-ops. We swallow exceptions so a teardown
+    # blip can't mask a real test failure in the report.
+    try:
+        druid.drop_datasource(ds)
+    except Exception:
+        pass
+    try:
+        pinot.delete_table(ds)
+    except Exception:
+        pass
+    try:
+        pinot.delete_schema(ds)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
