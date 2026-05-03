@@ -1,0 +1,341 @@
+"""
+End-to-end Druid → Pinot hybrid cutover orchestrator.
+
+Composes the existing building blocks — overlord watermark capture,
+hybrid planner, Pinot deployer, batch backfill, parity checker — into
+one ``run_cutover()`` call. Each phase writes its artifact under a
+single ``out_dir`` so the operator has a complete record of the
+cutover after the fact.
+
+The orchestrator itself is pure-ish: it takes already-constructed
+clients via dependency injection so unit tests can drop in stubs and
+the CLI wrapper can plumb authenticated sessions in. The CLI command
+in ``migrator/cli/commands/cutover.py`` is the only place we
+instantiate concrete clients with real network endpoints.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from migrator.core.errors import GenerationError
+from migrator.core.models import CanonicalMigrationModel
+from migrator.druid.normalizer import DruidNormalizer
+from migrator.druid.parser import DruidSpecParser
+from migrator.parity.models import ParityResult
+from migrator.parity.query_builder import derive_queries_from_canonical
+from migrator.parity.runner import run_parity
+from migrator.pinot.deployer import (
+    DeployArtifacts,
+    DeployReport,
+    PinotDeployer,
+    discover_artifacts,
+)
+from migrator.realtime.backfill_runner import (
+    BackfillResult,
+    DruidSqlPager,
+    PinotIngestSink,
+    run_backfill,
+)
+from migrator.realtime.hybrid_planner import (
+    plan_hybrid_migration,
+    write_hybrid_plan,
+)
+from migrator.realtime.models import KafkaOffsetMap
+from migrator.realtime.offset_io import save_offset_map
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config + result types
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class CutoverConfig:
+    """All knobs that drive a cutover run.
+
+    ``spec_path`` is the Druid Kafka supervisor JSON used by both
+    plan-hybrid (to derive the canonical model) and parity-check
+    (to auto-derive queries).
+    """
+    supervisor_id: str
+    datasource: str
+    pinot_table: str
+    spec_path: Path
+    out_dir: Path
+    staging_dir: Path
+    backfill_start_iso: str = "1970-01-01T00:00:00.000Z"
+    backfill_end_iso: str | None = None  # defaults to the captured watermark
+    backfill_page_rows: int = 50_000
+    backfill_time_column: str = "timestamp"
+    skip_deploy: bool = False
+    skip_backfill: bool = False
+    skip_parity: bool = False
+    # When False, a step that errors is recorded but the orchestrator
+    # keeps going (useful for diagnostic dry-runs). Default True
+    # mirrors what an operator wants from a real cutover.
+    abort_on_error: bool = True
+
+
+@dataclass
+class CutoverStepResult:
+    step: str
+    status: str  # "ok" | "skipped" | "error"
+    detail: str = ""
+    artifact: str | None = None  # filesystem path for follow-up
+
+
+@dataclass
+class CutoverReport:
+    steps: list[CutoverStepResult] = field(default_factory=list)
+    out_dir: Path | None = None
+    parity: list[ParityResult] = field(default_factory=list)
+
+    @property
+    def all_ok(self) -> bool:
+        # Skipped phases don't count as failures — only steps that
+        # actually ran and reported "error".
+        return all(s.status != "error" for s in self.steps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "out_dir": str(self.out_dir) if self.out_dir else None,
+            "all_ok": self.all_ok,
+            "steps": [
+                {"step": s.step, "status": s.status, "detail": s.detail,
+                 "artifact": s.artifact}
+                for s in self.steps
+            ],
+            "parity": [r.model_dump() for r in self.parity],
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_canonical(spec_path: Path) -> CanonicalMigrationModel:
+    """Parse the supervisor spec into a canonical model."""
+    raw = json.loads(spec_path.read_text())
+    parsed = DruidSpecParser().parse(raw)
+    norm = DruidNormalizer().normalize(parsed.parsed_spec)
+    return norm.canonical
+
+
+def run_cutover(
+    cfg: CutoverConfig,
+    *,
+    overlord,
+    deployer: PinotDeployer | None = None,
+    pager: DruidSqlPager | None = None,
+    pinot_ingest_sink: PinotIngestSink | None = None,
+    druid_sql_client: Any = None,
+    pinot_sql_client: Any = None,
+) -> CutoverReport:
+    """Run all six cutover phases in order.
+
+    Phases (each emits one ``CutoverStepResult``):
+
+      1. extract_offsets   — overlord watermark capture
+      2. plan_hybrid       — generate OFFLINE + REALTIME table configs,
+                              schema, runbook, etc.
+      3. deploy            — push schema + tables to Pinot
+      4. backfill          — page Druid SQL → Pinot OFFLINE
+      5. parity            — run auto-derived parity queries
+
+    Skipped phases produce ``status="skipped"``. When
+    ``cfg.abort_on_error`` is True (default) the first ``"error"``
+    short-circuits the rest of the run; the report still contains
+    one ``CutoverStepResult`` per phase, with later phases marked
+    ``"skipped"``.
+    """
+    cfg.out_dir = Path(cfg.out_dir)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    report = CutoverReport(out_dir=cfg.out_dir)
+
+    aborted = False
+
+    def _step(step: str) -> bool:
+        """Append a 'skipped' record for a step we're not running and
+        return whether the step should actually execute."""
+        nonlocal aborted
+        if aborted:
+            report.steps.append(CutoverStepResult(
+                step=step, status="skipped",
+                detail="aborted after a previous error",
+            ))
+            return False
+        return True
+
+    def _record(step: str, status: str, detail: str = "",
+                artifact: str | None = None) -> None:
+        nonlocal aborted
+        report.steps.append(CutoverStepResult(
+            step=step, status=status, detail=detail, artifact=artifact,
+        ))
+        if status == "error" and cfg.abort_on_error:
+            aborted = True
+
+    # ── 1. Extract watermark ──────────────────────────────────────────────
+    offset_map: KafkaOffsetMap | None = None
+    if _step("extract_offsets"):
+        try:
+            offset_map = overlord.get_supervisor_offsets(cfg.supervisor_id)
+            offsets_path = cfg.out_dir / "offsets.json"
+            save_offset_map(offset_map, offsets_path)
+            _record(
+                "extract_offsets", "ok",
+                detail=f"watermark={offset_map.watermark_iso}",
+                artifact=str(offsets_path),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _record("extract_offsets", "error", detail=str(exc))
+
+    # ── 2. Plan hybrid ────────────────────────────────────────────────────
+    canonical: CanonicalMigrationModel | None = None
+    plan_dir = cfg.out_dir / "hybrid"
+    if _step("plan_hybrid"):
+        try:
+            canonical = _load_canonical(cfg.spec_path)
+            if offset_map is None:
+                # Defensive — only reachable if the orchestrator was
+                # called with skip_extract_offsets in a future revision.
+                raise GenerationError("plan_hybrid requires a captured offset map")
+            plan = plan_hybrid_migration(canonical, offset_map)
+            plan_paths = write_hybrid_plan(plan, plan_dir)
+            _record(
+                "plan_hybrid", "ok",
+                detail=f"wrote {len(plan_paths)} files",
+                artifact=str(plan_dir),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _record("plan_hybrid", "error", detail=str(exc))
+
+    # ── 3. Deploy ─────────────────────────────────────────────────────────
+    if cfg.skip_deploy:
+        report.steps.append(CutoverStepResult(
+            step="deploy", status="skipped", detail="--skip-deploy",
+        ))
+    elif _step("deploy"):
+        if deployer is None:
+            _record("deploy", "error",
+                    detail="no PinotDeployer wired in")
+        else:
+            try:
+                artifacts = discover_artifacts(plan_dir)
+                deploy_report: DeployReport = deployer.deploy(artifacts)
+                # Persist a copy of the deploy report for forensics.
+                (cfg.out_dir / "deploy-report.json").write_text(
+                    json.dumps(
+                        [{"artifact": r.artifact, "name": r.name,
+                          "status": r.status, "detail": r.detail}
+                         for r in deploy_report.results],
+                        indent=2,
+                    ) + "\n",
+                )
+                if not deploy_report.all_ok:
+                    _record(
+                        "deploy", "error",
+                        detail=f"{deploy_report.errored} of "
+                               f"{len(deploy_report.results)} artifacts failed",
+                    )
+                else:
+                    _record(
+                        "deploy", "ok",
+                        detail=f"{deploy_report.created} created, "
+                               f"{deploy_report.already_exists} already existed",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _record("deploy", "error", detail=str(exc))
+
+    # ── 4. Backfill ───────────────────────────────────────────────────────
+    if cfg.skip_backfill:
+        report.steps.append(CutoverStepResult(
+            step="backfill", status="skipped", detail="--skip-backfill",
+        ))
+    elif _step("backfill"):
+        if pager is None or pinot_ingest_sink is None:
+            _record("backfill", "error",
+                    detail="no DruidSqlPager / PinotIngestSink wired in")
+        else:
+            try:
+                end_iso = (cfg.backfill_end_iso
+                           or (offset_map.watermark_iso if offset_map else None))
+                if end_iso is None:
+                    raise RuntimeError(
+                        "backfill end-ISO unset; run extract_offsets first "
+                        "or pass --backfill-end-iso"
+                    )
+                staging = Path(cfg.staging_dir)
+                t0 = time.time()
+                bf: BackfillResult = run_backfill(
+                    datasource=cfg.datasource,
+                    pinot_table=cfg.pinot_table,
+                    start_iso=cfg.backfill_start_iso,
+                    end_iso=end_iso,
+                    staging_dir=staging,
+                    pager=pager,
+                    sink=pinot_ingest_sink,
+                    page_rows=cfg.backfill_page_rows,
+                    time_column=cfg.backfill_time_column,
+                )
+                _record(
+                    "backfill", "ok",
+                    detail=f"{bf.rows_dumped} rows in {bf.pages_dumped} "
+                           f"pages ({time.time() - t0:.1f}s)",
+                    artifact=str(staging),
+                )
+            except Exception as exc:  # noqa: BLE001
+                _record("backfill", "error", detail=str(exc))
+
+    # ── 5. Parity ─────────────────────────────────────────────────────────
+    if cfg.skip_parity:
+        report.steps.append(CutoverStepResult(
+            step="parity", status="skipped", detail="--skip-parity",
+        ))
+    elif _step("parity"):
+        if druid_sql_client is None or pinot_sql_client is None or canonical is None:
+            _record("parity", "error",
+                    detail="no parity SQL clients wired in (or canonical missing)")
+        else:
+            try:
+                queries = derive_queries_from_canonical(
+                    canonical, pinot_table=cfg.pinot_table,
+                )
+                results = run_parity(
+                    queries, druid=druid_sql_client, pinot=pinot_sql_client,
+                )
+                report.parity = results
+                # Persist the parity report next to the rest.
+                (cfg.out_dir / "parity-report.json").write_text(
+                    json.dumps(
+                        [r.model_dump() for r in results],
+                        indent=2, default=str,
+                    ) + "\n",
+                )
+                failed = [r for r in results if not r.passed]
+                if failed:
+                    _record(
+                        "parity", "error",
+                        detail=f"{len(failed)} of {len(results)} parity "
+                               f"checks failed",
+                    )
+                else:
+                    _record(
+                        "parity", "ok",
+                        detail=f"{len(results)}/{len(results)} parity checks passed",
+                        artifact=str(cfg.out_dir / "parity-report.json"),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _record("parity", "error", detail=str(exc))
+
+    # ── 6. Final summary file ─────────────────────────────────────────────
+    summary_path = cfg.out_dir / "cutover-report.json"
+    summary_path.write_text(json.dumps(report.to_dict(), indent=2, default=str) + "\n")
+
+    return report
