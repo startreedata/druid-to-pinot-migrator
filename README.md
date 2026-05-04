@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/ci.yml)
 [![Version Matrix](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/version-matrix.yml/badge.svg)](https://github.com/startreedata/druid-to-pinot-migrator/actions/workflows/version-matrix.yml)
+[![codecov](https://codecov.io/gh/startreedata/druid-to-pinot-migrator/branch/main/graph/badge.svg)](https://codecov.io/gh/startreedata/druid-to-pinot-migrator)
 
 A CLI tool for migrating Apache Druid ingestion specs to Apache Pinot artifacts.
 

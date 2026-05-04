@@ -132,6 +132,18 @@ jobs:
             coverage-branch.txt
           retention-days: 90
 
+      # Codecov: tag this upload as the release line so the dashboard
+      # can plot per-release coverage trends, separate from PR runs.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: release
+          override_branch: ${{ needs.resolve.outputs.tag }}
+          fail_ci_if_error: false
+          verbose: true
+
   # ──────────────────────────────────────────────────────────────────────
   # Bump version in pyproject.toml (if needed) and create the git tag.
   # Both operations are idempotent: re-running this job with the same
