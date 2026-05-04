@@ -179,7 +179,49 @@ class TestRunParityGroupby:
         pinot = StubPinot({"P": [["us-east", 100], ["us-west", 999]]})
         out = run_parity([q], druid=druid, pinot=pinot)
         assert out[0].passed is False
-        assert "first diff" in out[0].detail
+        # Per-row diff format: lists every divergent group, not just
+        # the first. Easier to triage CI failures.
+        assert "1 divergent group(s)" in out[0].detail
+        assert "us-west" in out[0].detail
+        assert "druid=(200,)" in out[0].detail
+        assert "pinot=(999,)" in out[0].detail
+        # us-east matches → MUST NOT appear in the diff body.
+        assert "us-east" not in out[0].detail
+
+    def test_groupby_only_in_one_side_each_listed(self):
+        # Druid has 'us-east' that Pinot doesn't, Pinot has 'apac' that
+        # Druid doesn't, plus 'us-west' value differs.
+        q = ParityQuery(label="g", druid="D", pinot="P", type="groupby")
+        druid = StubDruid({"D": [
+            {"region": "us-east", "c": 100},
+            {"region": "us-west", "c": 200},
+        ]})
+        pinot = StubPinot({"P": [
+            ["us-west", 999],
+            ["apac",     50],
+        ]})
+        out = run_parity([q], druid=druid, pinot=pinot)
+        assert out[0].passed is False
+        d = out[0].detail
+        assert "3 divergent group(s)" in d
+        assert "us-east" in d and "missing in pinot" in d
+        assert "apac" in d and "missing in druid" in d
+        assert "us-west" in d and "druid=(200,)" in d and "pinot=(999,)" in d
+
+    def test_groupby_diff_truncated_above_cap(self):
+        # 12 divergent groups → at most 10 in the body + "more (truncated)".
+        druid_rows = [{"k": f"k_{i}", "c": i} for i in range(12)]
+        pinot_rows = [[f"k_{i}", i + 1] for i in range(12)]  # all values diverge
+        q = ParityQuery(label="g", druid="D", pinot="P", type="groupby")
+        out = run_parity(
+            [q],
+            druid=StubDruid({"D": druid_rows}),
+            pinot=StubPinot({"P": pinot_rows}),
+        )
+        assert out[0].passed is False
+        d = out[0].detail
+        assert "12 divergent group(s)" in d
+        assert "2 more (truncated)" in d
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,3 +307,120 @@ class TestLoadQueries:
         }))
         with pytest.raises(Exception):
             load_queries(path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI helpers: _wait_for_pinot_to_settle, _pinot_tables_referenced
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.cli.commands.parity_check import (  # noqa: E402
+    _pinot_tables_referenced,
+    _wait_for_pinot_to_settle,
+)
+
+
+class TestPinotTablesReferenced:
+    def test_extracts_single_table(self):
+        q = ParityQuery(
+            label="x", druid="D",
+            pinot="SELECT COUNT(*) FROM events",
+        )
+        assert _pinot_tables_referenced([q]) == ["events"]
+
+    def test_dedupes_across_queries(self):
+        qs = [
+            ParityQuery(label="a", druid="D",
+                        pinot="SELECT COUNT(*) FROM events"),
+            ParityQuery(label="b", druid="D",
+                        pinot="SELECT region, COUNT(*) FROM events GROUP BY region"),
+        ]
+        assert _pinot_tables_referenced(qs) == ["events"]
+
+    def test_quoted_identifier(self):
+        q = ParityQuery(
+            label="x", druid="D",
+            pinot='SELECT COUNT(*) FROM "events"',
+        )
+        assert _pinot_tables_referenced([q]) == ["events"]
+
+    def test_case_insensitive_from(self):
+        q = ParityQuery(
+            label="x", druid="D",
+            pinot="select count(*) from events",
+        )
+        assert _pinot_tables_referenced([q]) == ["events"]
+
+    def test_missing_from_returns_empty(self):
+        # A degenerate "SELECT 1" that doesn't FROM any table.
+        q = ParityQuery(label="x", druid="D", pinot="SELECT 1")
+        assert _pinot_tables_referenced([q]) == []
+
+
+class TestWaitForPinotToSettle:
+    def test_no_tables_no_polling(self):
+        # No FROM in any query → nothing to wait for; no calls made.
+        client = StubPinot({})
+        qs = [ParityQuery(label="x", druid="D", pinot="SELECT 1")]
+        _wait_for_pinot_to_settle(client, qs, timeout_s=1)
+        assert client.calls == []
+
+    def test_exits_early_when_count_is_stable(self):
+        # Count is 100 from the very first poll; after 3 consecutive
+        # equal polls the wait exits. With a 3s inter-poll sleep,
+        # reaching the 3-poll streak takes ~6s, so use a 10s timeout
+        # to confirm the helper exits BEFORE the timeout fires.
+        client = StubPinot({"SELECT COUNT(*) FROM events": [[100]]})
+        qs = [ParityQuery(label="x", druid="D",
+                          pinot="SELECT COUNT(*) FROM events")]
+        import time as _t
+        t0 = _t.time()
+        _wait_for_pinot_to_settle(client, qs, timeout_s=10)
+        elapsed = _t.time() - t0
+        # 3 polls hit the stable threshold; helper must exit before
+        # the 10s deadline.
+        assert len(client.calls) == 3
+        assert elapsed < 10
+
+    def test_times_out_silently_on_unstable_counts(self):
+        # Count alternates 100 → 200 → 100 → 200 — never stable. Wait
+        # should hit the timeout and return without raising.
+        class Flapping:
+            def __init__(self):
+                self.calls = []
+                self._toggle = False
+
+            def query(self, sql):
+                self.calls.append(sql)
+                self._toggle = not self._toggle
+                return [[200 if self._toggle else 100]]
+
+        client = Flapping()
+        qs = [ParityQuery(label="x", druid="D",
+                          pinot="SELECT COUNT(*) FROM events")]
+        _wait_for_pinot_to_settle(client, qs, timeout_s=1)
+        # We hit the timeout — caller-side behavior is "continue
+        # silently"; the parity check itself will surface any
+        # divergence with a more useful error.
+
+    def test_handles_query_errors_silently(self):
+        # The Pinot table doesn't exist yet during early polls — the
+        # stub raises. The wait must not propagate.
+        class Boom:
+            def __init__(self):
+                self.calls = []
+                self.successful = 0
+
+            def query(self, sql):
+                self.calls.append(sql)
+                # First few queries raise; then stabilise at 50.
+                if self.successful < 2:
+                    self.successful += 1
+                    raise RuntimeError("table not ready")
+                return [[50]]
+
+        client = Boom()
+        qs = [ParityQuery(label="x", druid="D",
+                          pinot="SELECT COUNT(*) FROM events")]
+        _wait_for_pinot_to_settle(client, qs, timeout_s=5)
+        # Errors did not raise; the wait eventually saw stable counts.
