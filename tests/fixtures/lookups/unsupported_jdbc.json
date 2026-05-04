@@ -1,0 +1,21 @@
+{
+  "__default": {
+    "user_segments": {
+      "version": "v1",
+      "lookupExtractorFactory": {
+        "type": "cachedNamespace",
+        "extractionNamespace": {
+          "type": "jdbc",
+          "connectorConfig": {
+            "connectURI": "jdbc:postgresql://lookup-db/segments",
+            "user": "ro",
+            "password": "ro"
+          },
+          "table": "user_segments",
+          "keyColumn": "user_id",
+          "valueColumn": "segment"
+        }
+      }
+    }
+  }
+}

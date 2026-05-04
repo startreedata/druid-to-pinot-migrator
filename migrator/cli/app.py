@@ -13,6 +13,7 @@ from migrator.cli.commands import (
     normalize,
     parity_check,
     plan_hybrid,
+    translate_lookups,
     validate,
 )
 
@@ -34,6 +35,8 @@ app.command("deploy")(deploy.command)
 app.command("parity-check")(parity_check.command)
 # End-to-end orchestration
 app.command("cutover")(cutover.command)
+# Lookups: Druid cluster lookup config → Pinot dim tables
+app.command("translate-lookups")(translate_lookups.command)
 
 
 def main() -> None:
