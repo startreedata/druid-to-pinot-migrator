@@ -10,6 +10,11 @@ dist/
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
+coverage-comment.md
+coverage-html.tar.gz
+coverage-total.txt
+coverage-branch.txt
 .tox/
 .mypy_cache/
 .ruff_cache/
