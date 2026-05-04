@@ -434,3 +434,185 @@ class TestPinotIngestFromUriSink:
             seen_uris.append(qs["sourceURIStr"][0])
         assert len(set(seen_uris)) == 3
         assert all("page-" in u for u in seen_uris)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DruidHttpSqlPager — covers the SQL composer + pagination loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.realtime.backfill_runner import (
+    DruidHttpSqlPager,
+    PinotIngestFromFileSink,
+)
+
+
+class _PagerSpyResp:
+    def __init__(self, payload) -> None:
+        self._payload = payload
+        self.status_code = 200
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+class _PagerSpySession:
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.calls: list[tuple[str, dict]] = []
+        self.headers: dict[str, str] = {}
+
+    def post(self, url, *, data=None, timeout=None, **kwargs):
+        # The pager hits /druid/v2/sql; record the body so we can
+        # assert SQL composition without scraping log output.
+        self.calls.append((url, {"data": data, **kwargs}))
+        idx = len(self.calls) - 1
+        if idx < len(self._pages):
+            return _PagerSpyResp(self._pages[idx])
+        return _PagerSpyResp([])  # empty signals end of pagination
+
+
+class TestDruidHttpSqlPager:
+    def test_pages_until_empty(self):
+        # Two pages of 3 rows each, third is empty → loop exits.
+        session = _PagerSpySession([
+            [{"a": i} for i in range(3)],
+            [{"a": i} for i in range(3, 6)],
+        ])
+        pager = DruidHttpSqlPager("http://druid:8888/", session=session)
+        pages = list(pager.page_rows(
+            "ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            page_rows=3,
+        ))
+        assert len(pages) == 2
+        assert pages[0][0]["a"] == 0
+        # Three POSTs: pages 1, 2, then the trailing empty fetch that
+        # tells the loop pagination is done.
+        assert len(session.calls) == 3
+
+    def test_short_last_page_terminates_without_extra_fetch(self):
+        # When a page returns fewer rows than `page_rows`, the loop
+        # short-circuits — no extra "is the cursor empty" round-trip.
+        session = _PagerSpySession([
+            [{"a": i} for i in range(2)],  # short: only 2 of 3 requested
+        ])
+        pager = DruidHttpSqlPager("http://druid:8888", session=session)
+        pages = list(pager.page_rows(
+            "ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            page_rows=3,
+        ))
+        assert len(pages) == 1
+        assert len(session.calls) == 1   # no probe-for-empty fetch
+
+    def test_sql_uses_druid_timestamp_format_not_iso(self):
+        session = _PagerSpySession([[]])
+        pager = DruidHttpSqlPager("http://druid:8888", session=session)
+        list(pager.page_rows(
+            "ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00.123Z",
+            page_rows=10,
+        ))
+        # Druid SQL TIMESTAMP literals must use 'yyyy-MM-dd HH:mm:ss' —
+        # not ISO 8601. The pager rewrites T→space and strips Z.
+        body = session.calls[0][1]["data"]
+        assert "TIMESTAMP '2024-01-01 00:00:00'" in body
+        assert "TIMESTAMP '2024-02-01 00:00:00.123'" in body
+        assert "T00:00:00Z" not in body
+
+    def test_offset_advances_per_page(self):
+        session = _PagerSpySession([
+            [{"a": i} for i in range(3)],
+            [{"a": i} for i in range(3, 6)],
+        ])
+        pager = DruidHttpSqlPager("http://druid:8888", session=session)
+        list(pager.page_rows(
+            "ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            page_rows=3,
+        ))
+        # Page 1: OFFSET 0; page 2: OFFSET 3; page 3 (probe): OFFSET 6
+        offsets_seen = [
+            "OFFSET 0" in c[1]["data"] for c in session.calls
+        ]
+        assert any("OFFSET 0 ROWS" in c[1]["data"] for c in session.calls)
+        assert any("OFFSET 3 ROWS" in c[1]["data"] for c in session.calls)
+
+    def test_default_session_built_when_none_given(self):
+        # Smoke test: __init__ doesn't blow up without a session.
+        pager = DruidHttpSqlPager("http://druid:8888")
+        assert pager._session is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PinotIngestFromFileSink — multipart upload sink
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FileSinkResp:
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status_code = status
+        self.text = text
+
+
+class _FileSinkSession:
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.posts: list[tuple[str, dict]] = []
+        self.headers: dict[str, str] = {}
+        self._status = status
+        self._text = text
+
+    def post(self, url, *, files=None, timeout=None, **kwargs):
+        self.posts.append((url, {"files": files, **kwargs}))
+        return _FileSinkResp(self._status, self._text)
+
+
+class TestPinotIngestFromFileSink:
+    def test_upload_uses_multipart(self, tmp_path: Path):
+        page = tmp_path / "page-000000.json"
+        page.write_text('{"a": 1}\n')
+        session = _FileSinkSession(status=200)
+        sink = PinotIngestFromFileSink("http://pinot:9000/", session=session)
+
+        sink.ingest_file(page, "ds")
+
+        assert len(session.posts) == 1
+        url, kwargs = session.posts[0]
+        assert "/ingestFromFile" in url
+        assert "tableNameWithType=ds_OFFLINE" in url
+        assert kwargs["files"] is not None
+        # The actual file body — name is preserved on the multipart part.
+        name, fh, mime = kwargs["files"]["file"]
+        assert name == "page-000000.json"
+        assert mime == "application/octet-stream"
+
+    def test_201_is_accepted(self, tmp_path: Path):
+        # Pinot returns 201 on first-create, 200 on idempotent re-ingest.
+        page = tmp_path / "p.json"
+        page.write_text("{}\n")
+        session = _FileSinkSession(status=201)
+        sink = PinotIngestFromFileSink("http://pinot:9000", session=session)
+        sink.ingest_file(page, "ds")  # must not raise
+
+    def test_500_raises_runtime_error(self, tmp_path: Path):
+        page = tmp_path / "p.json"
+        page.write_text("{}\n")
+        session = _FileSinkSession(status=500, text="server burped")
+        sink = PinotIngestFromFileSink("http://pinot:9000", session=session)
+        with pytest.raises(RuntimeError, match="ingestFromFile failed"):
+            sink.ingest_file(page, "ds")
+
+    def test_default_session_built_when_none_given(self, tmp_path: Path):
+        # Without a session injected, the sink falls back to module-level
+        # `requests.post`. Verify __init__ accepts the no-session path.
+        sink = PinotIngestFromFileSink("http://pinot:9000")
+        assert sink._session is None

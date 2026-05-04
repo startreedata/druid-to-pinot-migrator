@@ -3,17 +3,11 @@ from __future__ import annotations
 import json
 
 import typer
-
-try:
-    from rich.console import Console
-
-    _RICH = True
-except ImportError:
-    _RICH = False
+from rich.console import Console
 
 from migrator.translators.pipeline import generate_bundle
 
-_console = Console() if _RICH else None
+_console = Console()
 
 
 def command(
@@ -49,21 +43,11 @@ def command(
         raise typer.Exit(1)
 
     if dry_run:
-        if _RICH and _console:
-            _console.print("[yellow]DRY RUN — no files written.[/yellow]")
-        else:
-            typer.echo("DRY RUN -- no files written.")
+        _console.print("[yellow]DRY RUN — no files written.[/yellow]")
         return
 
-    if _RICH and _console:
-        _console.print(f"[green]Generated {len(result.files_written)} file(s) in:[/green] {out}")
-        for f in result.files_written:
-            _console.print(f"  {f}")
-        for w in result.warnings:
-            _console.print(f"[yellow]WARNING:[/yellow] {w}")
-    else:
-        typer.echo(f"Generated {len(result.files_written)} file(s) in: {out}")
-        for f in result.files_written:
-            typer.echo(f"  {f}")
-        for w in result.warnings:
-            typer.echo(f"WARNING: {w}")
+    _console.print(f"[green]Generated {len(result.files_written)} file(s) in:[/green] {out}")
+    for f in result.files_written:
+        _console.print(f"  {f}")
+    for w in result.warnings:
+        _console.print(f"[yellow]WARNING:[/yellow] {w}")

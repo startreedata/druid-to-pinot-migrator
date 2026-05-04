@@ -3,17 +3,11 @@ from __future__ import annotations
 import json
 
 import typer
-
-try:
-    from rich.console import Console
-
-    _RICH = True
-except ImportError:
-    _RICH = False
+from rich.console import Console
 
 from migrator.translators.pipeline import validate_spec
 
-_console = Console() if _RICH else None
+_console = Console()
 
 
 def command(
@@ -44,24 +38,17 @@ def command(
             raise typer.Exit(1)
         return
 
-    if _RICH and _console:
-        status_color = {"pass": "green", "warn": "yellow", "fail": "red"}.get(
-            report.overall_status, "white"
-        )
-        _console.print(
-            f"[bold]Validation Status:[/bold] [{status_color}]{report.overall_status.upper()}[/{status_color}]"
-        )
-        _console.print(f"[bold]Confidence Score:[/bold] {report.confidence_score:.2f}")
-        _console.print(f"\n[bold]Checks ({len(report.checks)}):[/bold]")
-        for check in report.checks:
-            color = {"pass": "green", "warn": "yellow", "fail": "red"}.get(check.status, "white")
-            _console.print(f"  [{color}]{check.status.upper()}[/{color}] {check.check_id}: {check.message}")
-    else:
-        typer.echo(f"Validation Status: {report.overall_status.upper()}")
-        typer.echo(f"Confidence Score: {report.confidence_score:.2f}")
-        typer.echo(f"\nChecks ({len(report.checks)}):")
-        for check in report.checks:
-            typer.echo(f"  {check.status.upper()} {check.check_id}: {check.message}")
+    status_color = {"pass": "green", "warn": "yellow", "fail": "red"}.get(
+        report.overall_status, "white"
+    )
+    _console.print(
+        f"[bold]Validation Status:[/bold] [{status_color}]{report.overall_status.upper()}[/{status_color}]"
+    )
+    _console.print(f"[bold]Confidence Score:[/bold] {report.confidence_score:.2f}")
+    _console.print(f"\n[bold]Checks ({len(report.checks)}):[/bold]")
+    for check in report.checks:
+        color = {"pass": "green", "warn": "yellow", "fail": "red"}.get(check.status, "white")
+        _console.print(f"  [{color}]{check.status.upper()}[/{color}] {check.check_id}: {check.message}")
 
     if not result.success:
         raise typer.Exit(1)

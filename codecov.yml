@@ -1,22 +1,27 @@
 coverage:
   precision: 1
   round: nearest
-  range: "70...90"
+  range: "85...95"
 
   status:
-    # Project-wide status: informational for now (don't block PRs while
-    # we ratchet the metric up). Switch to `error` once we set a target.
+    # Project-wide gate: a PR is allowed to drop overall coverage by at
+    # most 0.5 percentage points relative to the merge base. Anything
+    # worse fails the check and blocks merging — keeps the metric from
+    # silently rotting over time.
     project:
       default:
         target: auto
-        threshold: 1.0%
-        informational: true
-    # Patch coverage (lines added by the PR): same — informational.
+        threshold: 0.5%
+        informational: false
+    # Patch coverage (lines newly added/modified by the PR): require
+    # that newly-introduced code is at least 80% covered. Refactors that
+    # rearrange existing well-tested code are unaffected; brand-new
+    # untested logic gets caught.
     patch:
       default:
-        target: auto
+        target: 80%
         threshold: 1.0%
-        informational: true
+        informational: false
 
 # PR comments: keep it concise — header + diff coverage. The full
 # per-file table is overwhelming on large PRs.

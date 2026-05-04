@@ -34,13 +34,6 @@ def write_json(path: str | Path, data: dict, indent: int = 2) -> None:
     path.write_text(json.dumps(data, sort_keys=True, indent=indent, ensure_ascii=False), encoding="utf-8")
 
 
-def write_yaml(path: str | Path, data: dict) -> None:
-    """Write YAML to a file."""
-    path = Path(path)
-    ensure_dir(path.parent)
-    path.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=True), encoding="utf-8")
-
-
 def ensure_dir(path: str | Path) -> None:
     """Create directory and all parents if they do not exist."""
     Path(path).mkdir(parents=True, exist_ok=True)
