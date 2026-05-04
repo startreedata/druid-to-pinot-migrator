@@ -13,18 +13,15 @@
 #   3. Produce 1,000 "old" events.
 #   4. Submit Druid Kafka supervisor; wait for it to consume them.
 #   5. Force Kafka to purge the consumed events (kafka-delete-records).
-#   6. Capture the watermark via `dpm extract-offsets`.
-#   7. Produce 500 "new" events. Druid keeps consuming.
-#   8. `dpm plan-hybrid` → OFFLINE + REALTIME table configs aligned at
-#      the watermark, with raw → rolled metric transformConfigs emitted
-#      by dpm itself (this was a manual override pre-v0.4.0).
-#   9. `dpm deploy` schemas + tables (was hand-written curl pre-v0.5.0);
-#      REALTIME picks up at the watermark via Kafka offsetsForTimes.
-#  10. `dpm backfill-batch --time-column timestamp` → pages Druid SQL
-#      into Pinot OFFLINE, with __time → timestamp rename + ISO→ms
-#      conversion done inside dpm itself (also pre-v0.4.0 workaround).
-#  11. `dpm parity-check --from-canonical` (was a bespoke Python
-#      validator pre-v0.5.0). Druid total == Pinot hybrid total.
+#   6. Produce 500 "new" events. Druid keeps consuming.
+#   7. `dpm cutover` — one command runs extract-offsets → plan-hybrid →
+#      deploy → backfill-batch → parity-check.
+#
+# Pre-v0.7.0 this script ran 5 separate dpm commands plus a hand-rolled
+# curl-and-wait loop, totalling ~80 LOC of orchestration. v0.6.0
+# introduced ``dpm cutover``; v0.7.0 made the parity phase reliable
+# via the wait-for-segments fix. v0.8.0 (this PR) updates the example
+# to use it.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -61,12 +58,12 @@ if command -v dpm >/dev/null 2>&1; then DPM=(dpm); else DPM=(python3 -m migrator
 
 # ── 1. Boot the cluster (only if not already up) ────────────────────────────
 if ! docker ps --filter 'name=migtest-pinot-controller' --format '{{.Names}}' | grep -q .; then
-  bold "[1/11] Booting Druid + Pinot + Kafka stack"
+  bold "[1/7] Booting Druid + Pinot + Kafka stack"
   docker compose -f "$COMPOSE_FILE" up -d --wait
 fi
 
 # ── 2. Topic with short retention ───────────────────────────────────────────
-bold "[2/11] Create topic '$TOPIC' (retention.ms=10000)"
+bold "[2/7] Create topic '$TOPIC' (retention.ms=10000)"
 docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server localhost:9092 --create --topic "$TOPIC" \
   --partitions 2 --replication-factor 1 \
@@ -75,11 +72,11 @@ docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-topics.sh \
   >/dev/null 2>&1 || cyan "  topic exists"
 
 # ── 3. Produce 1,000 historical events ──────────────────────────────────────
-bold "[3/11] Producing $N_OLD old events (timestamps ~7 days ago)"
+bold "[3/7] Producing $N_OLD old events (timestamps ~7 days ago)"
 python3 "$HERE/data/produce.py" old --topic "$TOPIC" --bootstrap "$KAFKA_BOOTSTRAP" --n "$N_OLD"
 
 # ── 4. Submit Druid Kafka supervisor; wait for ingestion ────────────────────
-bold "[4/11] Submitting Druid Kafka supervisor"
+bold "[4/7] Submitting Druid Kafka supervisor"
 curl -sf -X POST -H "Content-Type: application/json" \
   --data @"$HERE/specs/druid-supervisor.json" \
   "$DRUID_ROUTER/druid/indexer/v1/supervisor" >/dev/null
@@ -99,7 +96,7 @@ done
 cyan "  druid has $CNT rows"
 
 # ── 5. Force Kafka to purge consumed events ─────────────────────────────────
-bold "[5/11] Forcing Kafka retention purge (kafka-delete-records)"
+bold "[5/7] Forcing Kafka retention purge (kafka-delete-records)"
 LATEST=$(docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-get-offsets.sh \
   --bootstrap-server localhost:9092 --topic "$TOPIC" --time -1)
 P0_OFFSET=$(echo "$LATEST" | grep ":0:" | cut -d: -f3)
@@ -114,79 +111,39 @@ docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-delete-records.sh \
   --offset-json-file /tmp/delete-records.json
 cyan "  kafka earliest=latest=$P0_OFFSET/$P1_OFFSET — historical events purged from Kafka"
 
-# ── 6. Capture watermark ────────────────────────────────────────────────────
-bold "[6/11] Capturing watermark via dpm extract-offsets"
-mkdir -p "$OUT_DIR"
-"${DPM[@]}" extract-offsets \
-  --supervisor-id "$DATASOURCE" \
-  --overlord-url "$DRUID_OVERLORD" \
-  --out "$OUT_DIR/offsets.json"
-
-# ── 7. Produce 500 new events ───────────────────────────────────────────────
-bold "[7/11] Producing $N_NEW new events"
+# ── 6. Produce the new events that Pinot REALTIME will pick up ─────────────
+# We produce these BEFORE the cutover so that by the time
+# extract-offsets captures the watermark, the supervisor has consumed
+# them and Druid+Pinot are in steady state. (In a real cutover the
+# new events are arriving continuously; this script just simulates that
+# with one batch.)
+bold "[6/7] Producing $N_NEW new events"
 python3 "$HERE/data/produce.py" new --topic "$TOPIC" --bootstrap "$KAFKA_BOOTSTRAP" --n "$N_NEW"
 
-# ── 8. Plan hybrid ──────────────────────────────────────────────────────────
-bold "[8/11] dpm plan-hybrid"
-rm -rf "$OUT_DIR/hybrid"
-"${DPM[@]}" plan-hybrid "$HERE/specs/druid-supervisor.json" \
-  --offset-map "$OUT_DIR/offsets.json" \
-  --out "$OUT_DIR/hybrid"
-
-# Step 9 used to swap in a hand-patched table-realtime.json that added
-# `transformConfigs` mapping raw Kafka fields → Druid-rolled metric
-# names. As of #12 (v0.4.0), `dpm plan-hybrid` emits those transforms
-# automatically from the supervisor's metricsSpec, so the workaround is
-# no longer needed.
-
-# ── 9. Deploy to Pinot ──────────────────────────────────────────────────────
-bold "[9/11] dpm deploy (schema + OFFLINE + REALTIME → Pinot)"
-"${DPM[@]}" deploy \
-  --artifacts-dir "$OUT_DIR/hybrid" \
-  --pinot-controller "$PINOT_CTRL"
-
-cyan "  waiting for REALTIME to consume the 500 new events..."
-DEADLINE=$(( $(date +%s) + 180 ))
-while [[ $(date +%s) -lt $DEADLINE ]]; do
-  P=$(curl -sf -X POST -H "Content-Type: application/json" \
-    --data "{\"sql\":\"SELECT COUNT(*) FROM ${DATASOURCE}_REALTIME\"}" \
-    "$PINOT_BROKER/query/sql" 2>/dev/null \
-    | python3 -c "import json,sys
-try: d=json.load(sys.stdin); rows=d.get('resultTable',{}).get('rows',[]); print(int(rows[0][0]) if rows else 0)
-except: print(0)")
-  [[ "$P" -ge $N_NEW ]] && break
-  sleep 5
-done
-
-# ── 10. Backfill historical Druid → Pinot OFFLINE ──────────────────────────
-bold "[10/11] dpm backfill-batch (Druid history → Pinot OFFLINE)"
-WATERMARK_ISO=$(python3 -c "import json; print(json.load(open('$OUT_DIR/offsets.json'))['watermark_iso'])")
+# ── 7. Cutover — one command does extract-offsets → plan-hybrid →           ─
+#                deploy → backfill-batch → parity-check                       ─
+# Pre-v0.7.0 this was 5 separate dpm invocations + curls + a hand-rolled
+# wait loop (~80 LOC of run.sh scaffolding). v0.6.0 introduced
+# `dpm cutover`; v0.7.0 added the wait-for-segments fix that makes the
+# parity phase reliable. Now it's one command.
+bold "[7/7] dpm cutover"
+mkdir -p "$OUT_DIR"
 rm -rf "$STAGING_DIR"
-"${DPM[@]}" backfill-batch \
-  --datasource "$DATASOURCE" \
-  --pinot-table "$DATASOURCE" \
-  --start-iso '1970-01-01T00:00:00.000Z' \
-  --end-iso "$WATERMARK_ISO" \
-  --druid-router "$DRUID_ROUTER" \
-  --pinot-controller "$PINOT_CTRL" \
-  --staging-dir "$STAGING_DIR" \
-  --time-column timestamp
-
-# Step 12 used to renormalise the staging files because dpm exported
-# Druid's __time column unchanged. As of #11 (v0.4.0), dpm itself does
-# the rename + ISO→ms conversion via --time-column above, so the
-# data/fix_staging.py workaround is no longer needed.
-
-# ── 11. Validate parity ─────────────────────────────────────────────────────
-bold "[11/11] dpm parity-check --from-canonical (Druid ↔ Pinot)"
-sleep 3
-"${DPM[@]}" parity-check \
-  --from-canonical "$HERE/specs/druid-supervisor.json" \
-  --druid-url "$DRUID_ROUTER" \
-  --pinot-broker "$PINOT_BROKER"
+"${DPM[@]}" cutover \
+  --supervisor-id "$DATASOURCE" \
+  --datasource    "$DATASOURCE" \
+  --pinot-table   "$DATASOURCE" \
+  --spec "$HERE/specs/druid-supervisor.json" \
+  --druid-overlord    "$DRUID_OVERLORD" \
+  --druid-router      "$DRUID_ROUTER" \
+  --pinot-controller  "$PINOT_CTRL" \
+  --pinot-broker      "$PINOT_BROKER" \
+  --backfill-time-column timestamp \
+  --out         "$OUT_DIR" \
+  --staging-dir "$STAGING_DIR"
 
 bold "✓ Hybrid demo complete."
 cyan "  Druid Web Console:  $DRUID_ROUTER (browse via http://localhost:18888)"
 cyan "  Pinot Web UI:       $PINOT_CTRL"
-cyan "  dpm artifacts:      $OUT_DIR/hybrid/"
+cyan "  Cutover report:     $OUT_DIR/cutover-report.json"
 cyan "  Tear down with:     docker compose -f $COMPOSE_FILE down -v"
