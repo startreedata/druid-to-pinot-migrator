@@ -94,7 +94,43 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e ".[dev]"
-      - run: pytest tests/unit tests/integration -v --tb=short
+      - name: Run tests with coverage
+        run: |
+          pytest tests/unit tests/integration -v --tb=short \
+            --cov --cov-report=term --cov-report=xml --cov-report=html
+      - name: Coverage summary → workflow run page
+        run: |
+          set -euo pipefail
+          {
+            echo "## Test coverage — \`${{ needs.resolve.outputs.tag }}\`"
+            echo
+            coverage report --format=markdown
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build coverage attachments for the GitHub Release
+        run: |
+          set -euo pipefail
+          # Pack the HTML report into a single tarball so it can be a
+          # release asset (GitHub Releases allow individual files only).
+          tar -czf coverage-html.tar.gz htmlcov/
+          # A short, headline-style markdown summary so the release notes
+          # can quote the number without the full per-file table.
+          TOTAL=$(python3 -c "import xml.etree.ElementTree as ET; \
+            r=ET.parse('coverage.xml').getroot(); \
+            print(f\"{float(r.get('line-rate'))*100:.1f}\")")
+          BRANCH_RATE=$(python3 -c "import xml.etree.ElementTree as ET; \
+            r=ET.parse('coverage.xml').getroot(); \
+            print(f\"{float(r.get('branch-rate'))*100:.1f}\")")
+          echo "${TOTAL}" > coverage-total.txt
+          echo "${BRANCH_RATE}" > coverage-branch.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            coverage-html.tar.gz
+            coverage-total.txt
+            coverage-branch.txt
+          retention-days: 90
 
   # ──────────────────────────────────────────────────────────────────────
   # Bump version in pyproject.toml (if needed) and create the git tag.
@@ -242,6 +278,11 @@ jobs:
           name: dist
           path: dist/
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
       - name: Generate release notes
         id: notes
         env:
@@ -250,6 +291,8 @@ jobs:
           set -euo pipefail
           PREV=$(git tag --list 'v*' --sort=-v:refname \
                    | grep -v "^${TAG}$" | head -1 || true)
+          COV_LINE=$(cat coverage/coverage-total.txt)
+          COV_BRANCH=$(cat coverage/coverage-branch.txt)
 
           {
             echo "## What's changed"
@@ -265,6 +308,14 @@ jobs:
             fi
 
             echo
+            echo
+            echo "## Test coverage"
+            echo
+            echo "- **Lines:** ${COV_LINE}%"
+            echo "- **Branches:** ${COV_BRANCH}%"
+            echo
+            echo "Detailed report: \`coverage.xml\` (Cobertura) and \`coverage-html.tar.gz\` (browseable HTML) are attached below."
+
             echo
             echo "## Install"
             echo
@@ -289,6 +340,8 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            coverage/coverage.xml
+            coverage/coverage-html.tar.gz
           # Don't auto-mark prereleases as latest, but tag a stable
           # release as latest so the "Releases" tab surfaces it.
           make_latest: ${{ !contains(needs.resolve.outputs.version, '-') }}

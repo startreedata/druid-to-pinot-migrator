@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: write   # for the coverage sticky-comment step on PRs
+
 jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -31,8 +35,96 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev]"
 
+      # Coverage is measured on the canonical 3.11 cell only — running it
+      # on every Python version would just duplicate identical numbers and
+      # spam the PR with redundant comments.
+      - name: Run unit + integration tests (with coverage)
+        if: matrix.python-version == '3.11'
+        run: |
+          pytest tests/unit tests/integration -v --tb=short \
+            --cov --cov-report=term --cov-report=xml --cov-report=html
+
       - name: Run unit + integration tests
+        if: matrix.python-version != '3.11'
         run: pytest tests/unit tests/integration -v --tb=short
+
+      - name: Coverage summary → workflow run page
+        if: matrix.python-version == '3.11'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Test coverage"
+            echo
+            echo "Generated against \`migrator/\` from unit + integration tests."
+            echo
+            coverage report --format=markdown
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage summary → file (for downstream steps)
+        if: matrix.python-version == '3.11'
+        id: cov
+        run: |
+          set -euo pipefail
+          # Total percent — single number for the comment headline.
+          TOTAL=$(python3 -c "import xml.etree.ElementTree as ET; \
+            r=ET.parse('coverage.xml').getroot(); \
+            print(f\"{float(r.get('line-rate'))*100:.1f}\")")
+          BRANCH_RATE=$(python3 -c "import xml.etree.ElementTree as ET; \
+            r=ET.parse('coverage.xml').getroot(); \
+            print(f\"{float(r.get('branch-rate'))*100:.1f}\")")
+          echo "total=$TOTAL"          >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH_RATE"   >> "$GITHUB_OUTPUT"
+          {
+            echo "<!-- dpm-coverage-report -->"
+            echo "## :test_tube: Test coverage — \`${TOTAL}%\` lines, \`${BRANCH_RATE}%\` branches"
+            echo
+            echo "<details><summary>Per-file breakdown</summary>"
+            echo
+            coverage report --format=markdown
+            echo
+            echo "</details>"
+            echo
+            echo "_Source: \`pytest tests/unit tests/integration\` against \`migrator/\` on Python 3.11._"
+          } > coverage-comment.md
+
+      - name: Upload coverage artifacts
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.event_name }}-${{ github.run_id }}
+          path: |
+            coverage.xml
+            htmlcov/
+            coverage-comment.md
+          retention-days: 30
+
+      # Sticky PR comment: find an existing one (matched by the magic
+      # marker) and update it; otherwise create a new one. Uses gh CLI
+      # only — no third-party action needed.
+      - name: Post / update coverage comment on the PR
+        if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MARKER: '<!-- dpm-coverage-report -->'
+        run: |
+          set -euo pipefail
+          BODY=$(cat coverage-comment.md)
+          EXISTING_ID=$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" \
+              | head -1 || true
+          )
+          if [[ -n "$EXISTING_ID" ]]; then
+            echo "Updating existing comment $EXISTING_ID"
+            gh api -X PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
+              -f body="$BODY" >/dev/null
+          else
+            echo "Creating new coverage comment on PR #${PR_NUMBER}"
+            gh pr comment "$PR_NUMBER" --body "$BODY"
+          fi
 
       - name: CLI smoke — inspect / generate / validate
         run: |

@@ -65,3 +65,26 @@ packages = ["migrator"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600
+
+[tool.coverage.run]
+source = ["migrator"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+# Skip noisy lines that distort the metric without indicating real risk:
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]
+show_missing = true
+skip_covered = false
+precision = 1
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.html]
+directory = "htmlcov"
