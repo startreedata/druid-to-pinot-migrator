@@ -17,6 +17,74 @@ from migrator.parity.query_builder import derive_queries_from_canonical
 from migrator.parity.runner import run_parity
 
 
+def _pinot_tables_referenced(queries: list[ParityQuery]) -> list[str]:
+    """Best-effort extraction of Pinot table names from the queries.
+
+    We don't actually parse the SQL — just look for FROM <ident>
+    case-insensitively, take the first identifier, and dedupe. The
+    parity check only wants to wait for tables the queries actually
+    hit; over-parsing is wasted effort.
+    """
+    import re
+
+    seen: list[str] = []
+    pat = re.compile(r"\bFROM\s+\"?([A-Za-z_][\w]*)\"?", re.IGNORECASE)
+    for q in queries:
+        m = pat.search(q.pinot)
+        if m and m.group(1) not in seen:
+            seen.append(m.group(1))
+    return seen
+
+
+def _wait_for_pinot_to_settle(
+    pinot_client,
+    queries: list[ParityQuery],
+    *,
+    timeout_s: int,
+) -> None:
+    """Poll Pinot until each referenced table's row count is stable.
+
+    "Stable" = same value for 3 consecutive polls (a Pinot OFFLINE
+    segment that's still being built grows monotonically; a stable
+    count means the build has settled). On timeout we silently
+    continue — the parity check itself will surface any divergence
+    with a more useful error than we could here.
+    """
+    import time
+
+    tables = _pinot_tables_referenced(queries)
+    if not tables:
+        return
+    typer.echo(
+        f"Waiting up to {timeout_s}s for Pinot to settle "
+        f"({', '.join(tables)})...",
+        err=True,
+    )
+    deadline = time.time() + timeout_s
+    streak: dict[str, tuple[int, int]] = {}  # table → (last_count, streak)
+    while time.time() < deadline:
+        all_settled = True
+        for tbl in tables:
+            try:
+                rows = pinot_client.query(f"SELECT COUNT(*) FROM {tbl}")
+                count = int(rows[0][0]) if rows else 0
+            except Exception:
+                count = -1
+            last, hits = streak.get(tbl, (-1, 0))
+            if count == last and count >= 0:
+                streak[tbl] = (count, hits + 1)
+            else:
+                streak[tbl] = (count, 1)
+            if streak[tbl][1] < 3:
+                all_settled = False
+        if all_settled:
+            return
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(3.0, remaining))
+
+
 def _load_canonical(path: Path):
     """Load a canonical migration model from a Druid spec or canonical JSON.
 
@@ -102,6 +170,21 @@ def command(
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Print the results as JSON instead of pretty text."
+    ),
+    wait_for_pinot: int = typer.Option(
+        0,
+        "--wait-for-pinot",
+        help=(
+            "Wait this many seconds for Pinot row counts to settle "
+            "before running the parity queries. Useful right after "
+            "an `ingestFromFile` (the controller returns 200 as soon "
+            "as the segment build is queued, but the OFFLINE table "
+            "isn't queryable for another 30-300s). The wait polls "
+            "Pinot's `SELECT COUNT(*)` against each table the parity "
+            "queries reference and exits early once every table has "
+            "stayed at the same row count for 3 consecutive polls. "
+            "Default 0 = run immediately."
+        ),
     ),
     druid_auth: str | None = typer.Option(
         None,
@@ -224,6 +307,11 @@ def command(
 
     druid_client = DruidHttpSqlClient(druid_url, session=druid_session)
     pinot_client = PinotHttpSqlClient(pinot_broker, session=pinot_session)
+
+    if wait_for_pinot > 0:
+        _wait_for_pinot_to_settle(
+            pinot_client, parity_queries, timeout_s=wait_for_pinot,
+        )
 
     results = run_parity(parity_queries, druid=druid_client, pinot=pinot_client)
 

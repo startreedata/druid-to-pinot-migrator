@@ -86,6 +86,9 @@ def _scalar(client_d, client_p, q: ParityQuery) -> ParityResult:
     )
 
 
+_GROUPBY_DIFF_CAP = 10  # Truncate full per-row diff after this many entries.
+
+
 def _groupby(client_d, client_p, q: ParityQuery) -> ParityResult:
     drows = client_d.query(q.druid)
     prows = client_p.query(q.pinot)
@@ -105,20 +108,48 @@ def _groupby(client_d, client_p, q: ParityQuery) -> ParityResult:
             detail=f"({len(d_sorted)} groups)",
         )
 
-    # Locate the first divergence so the failure message is useful.
-    diff_msg: str
-    if len(d_sorted) != len(p_sorted):
-        diff_msg = (
-            f"druid groups={len(d_sorted)}  pinot groups={len(p_sorted)}"
-        )
-    else:
-        for i, (d, p) in enumerate(zip(d_sorted, p_sorted, strict=True)):
-            if d != p:
-                diff_msg = f"first diff @ row {i}: druid={d}  pinot={p}"
-                break
-        else:  # pragma: no cover — equality already returned above
-            diff_msg = "diverge but no row-level diff found"
-    return ParityResult(label=q.label, passed=False, detail=diff_msg)
+    # Compute the full per-key set diff. Group keys are the first
+    # column of each tuple; the remaining columns are the aggregates.
+    # Operators care about three buckets:
+    #   - keys present in Druid but missing from Pinot
+    #   - keys present in Pinot but missing from Druid
+    #   - keys present on both sides whose aggregate values differ
+    d_by_key = {row[0]: row[1:] for row in d_sorted}
+    p_by_key = {row[0]: row[1:] for row in p_sorted}
+
+    only_druid = sorted(set(d_by_key) - set(p_by_key))
+    only_pinot = sorted(set(p_by_key) - set(d_by_key))
+    value_diffs = sorted(
+        (k, d_by_key[k], p_by_key[k])
+        for k in (set(d_by_key) & set(p_by_key))
+        if d_by_key[k] != p_by_key[k]
+    )
+    total_diffs = len(only_druid) + len(only_pinot) + len(value_diffs)
+
+    parts = [
+        f"druid groups={len(d_sorted)}  pinot groups={len(p_sorted)}",
+        f"{total_diffs} divergent group(s):",
+    ]
+    shown = 0
+    for k in only_druid:
+        if shown >= _GROUPBY_DIFF_CAP:
+            break
+        parts.append(f"  - {k!r}: in druid (={d_by_key[k]}), missing in pinot")
+        shown += 1
+    for k in only_pinot:
+        if shown >= _GROUPBY_DIFF_CAP:
+            break
+        parts.append(f"  - {k!r}: in pinot (={p_by_key[k]}), missing in druid")
+        shown += 1
+    for k, dv, pv in value_diffs:
+        if shown >= _GROUPBY_DIFF_CAP:
+            break
+        parts.append(f"  - {k!r}: druid={dv}  pinot={pv}")
+        shown += 1
+    if total_diffs > _GROUPBY_DIFF_CAP:
+        parts.append(f"  ... {total_diffs - _GROUPBY_DIFF_CAP} more (truncated)")
+
+    return ParityResult(label=q.label, passed=False, detail="\n".join(parts))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
