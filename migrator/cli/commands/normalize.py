@@ -4,18 +4,12 @@ import json
 from pathlib import Path
 
 import typer
-
-try:
-    from rich.console import Console
-
-    _RICH = True
-except ImportError:
-    _RICH = False
+from rich.console import Console
 
 from migrator.translators.pipeline import normalize_spec
 from migrator.utils.io import write_json
 
-_console = Console() if _RICH else None
+_console = Console()
 
 
 def command(
@@ -47,15 +41,8 @@ def command(
         typer.echo(json.dumps(canonical_dict, indent=2, sort_keys=True))
         return
 
-    if _RICH and _console:
-        _console.print(f"[bold]Datasource:[/bold] {canonical.datasource_name}")
-        _console.print(f"[bold]Source Kind:[/bold] {canonical.source_kind}")
-        _console.print(f"[bold]Classification:[/bold] {canonical.classification}")
-        for w in result.warnings:
-            _console.print(f"[yellow]WARNING:[/yellow] {w}")
-    else:
-        typer.echo(f"Datasource:     {canonical.datasource_name}")
-        typer.echo(f"Source Kind:    {canonical.source_kind}")
-        typer.echo(f"Classification: {canonical.classification}")
-        for w in result.warnings:
-            typer.echo(f"WARNING: {w}")
+    _console.print(f"[bold]Datasource:[/bold] {canonical.datasource_name}")
+    _console.print(f"[bold]Source Kind:[/bold] {canonical.source_kind}")
+    _console.print(f"[bold]Classification:[/bold] {canonical.classification}")
+    for w in result.warnings:
+        _console.print(f"[yellow]WARNING:[/yellow] {w}")
