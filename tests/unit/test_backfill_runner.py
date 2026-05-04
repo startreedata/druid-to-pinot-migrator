@@ -378,6 +378,25 @@ class TestPinotIngestFromUriSink:
         assert "files" not in kwargs
         assert "data" not in kwargs
 
+    def test_unsets_content_type_for_body_less_post(self, tmp_path: Path):
+        # /ingestFromURI is a parameter-only endpoint; sending an empty
+        # body with `Content-Type: application/json` makes Pinot's
+        # content negotiation return 415 (verified across 1.0/1.4/1.5).
+        # The sink must override any session-level Content-Type to None
+        # so requests strips the header on this call.
+        page = tmp_path / "page-000000.json"
+        page.write_text("{}\n")
+        session = _SpySession()
+        sink = PinotIngestFromUriSink("http://pinot:9000", session=session)
+
+        sink.ingest_file(page, "ds")
+
+        _, kwargs = session.posts[0]
+        assert kwargs.get("headers", {}).get("Content-Type") is None
+        # Specifically the header dict must contain the key — so
+        # requests' merge logic actually unsets it from the session.
+        assert "Content-Type" in kwargs["headers"]
+
     def test_500_response_raises(self, tmp_path: Path):
         page = tmp_path / "page.json"
         page.write_text("{}\n")
