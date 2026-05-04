@@ -1,0 +1,18 @@
+{
+  "__default": {
+    "campaign_lookup": {
+      "version": "v1",
+      "lookupExtractorFactory": {
+        "type": "cachedNamespace",
+        "extractionNamespace": {
+          "type": "uri",
+          "uri": "file:///opt/lookups/campaigns.csv",
+          "namespaceParseSpec": {
+            "format": "csv",
+            "columns": ["campaign_id", "campaign_name"]
+          }
+        }
+      }
+    }
+  }
+}

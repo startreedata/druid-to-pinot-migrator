@@ -1,0 +1,34 @@
+{
+  "__default": {
+    "country_code_to_name": {
+      "version": "v1",
+      "lookupExtractorFactory": {
+        "type": "cachedNamespace",
+        "extractionNamespace": {
+          "type": "staticMap",
+          "map": {
+            "us": "United States",
+            "ca": "Canada",
+            "mx": "Mexico"
+          }
+        },
+        "firstCacheTimeout": 0,
+        "injective": true
+      }
+    },
+    "platform_short_to_long": {
+      "version": "v1",
+      "lookupExtractorFactory": {
+        "type": "cachedNamespace",
+        "extractionNamespace": {
+          "type": "staticMap",
+          "map": {
+            "ios": "iOS",
+            "and": "Android",
+            "web": "Web Browser"
+          }
+        }
+      }
+    }
+  }
+}
