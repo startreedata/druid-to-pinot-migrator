@@ -213,7 +213,6 @@ class PinotIngestFromUriSink:
         if session is None:
             import requests
             session = requests.Session()
-            session.headers.update({"Content-Type": "application/json"})
         self._session = session
 
     def _build_source_uri(self, path: Path) -> str:
@@ -238,7 +237,16 @@ class PinotIngestFromUriSink:
             f"&batchConfigMapStr={urllib.parse.quote(json.dumps(batch_cfg))}"
             f"&sourceURIStr={urllib.parse.quote(source_uri)}"
         )
-        resp = self._session.post(url, timeout=self._timeout)
+        # /ingestFromURI is a control-plane-only call: no body, parameters
+        # in the querystring. Setting Content-Type: application/json with
+        # an empty body trips Pinot's content negotiation and returns 415
+        # across all tested versions; passing None here unsets any value
+        # the caller may have set on the shared session.
+        resp = self._session.post(
+            url,
+            timeout=self._timeout,
+            headers={"Content-Type": None},
+        )
         if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Pinot ingestFromURI failed for {source_uri}: "
