@@ -12,7 +12,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write   # for the coverage sticky-comment step on PRs
 
 jobs:
   test:
@@ -60,33 +59,6 @@ jobs:
             coverage report --format=markdown
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Coverage summary → file (for downstream steps)
-        if: matrix.python-version == '3.11'
-        id: cov
-        run: |
-          set -euo pipefail
-          # Total percent — single number for the comment headline.
-          TOTAL=$(python3 -c "import xml.etree.ElementTree as ET; \
-            r=ET.parse('coverage.xml').getroot(); \
-            print(f\"{float(r.get('line-rate'))*100:.1f}\")")
-          BRANCH_RATE=$(python3 -c "import xml.etree.ElementTree as ET; \
-            r=ET.parse('coverage.xml').getroot(); \
-            print(f\"{float(r.get('branch-rate'))*100:.1f}\")")
-          echo "total=$TOTAL"          >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH_RATE"   >> "$GITHUB_OUTPUT"
-          {
-            echo "<!-- dpm-coverage-report -->"
-            echo "## :test_tube: Test coverage — \`${TOTAL}%\` lines, \`${BRANCH_RATE}%\` branches"
-            echo
-            echo "<details><summary>Per-file breakdown</summary>"
-            echo
-            coverage report --format=markdown
-            echo
-            echo "</details>"
-            echo
-            echo "_Source: \`pytest tests/unit tests/integration\` against \`migrator/\` on Python 3.11._"
-          } > coverage-comment.md
-
       - name: Upload coverage artifacts
         if: matrix.python-version == '3.11'
         uses: actions/upload-artifact@v4
@@ -95,36 +67,21 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
-            coverage-comment.md
           retention-days: 30
 
-      # Sticky PR comment: find an existing one (matched by the magic
-      # marker) and update it; otherwise create a new one. Uses gh CLI
-      # only — no third-party action needed.
-      - name: Post / update coverage comment on the PR
-        if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          MARKER: '<!-- dpm-coverage-report -->'
-        run: |
-          set -euo pipefail
-          BODY=$(cat coverage-comment.md)
-          EXISTING_ID=$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --paginate \
-              --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" \
-              | head -1 || true
-          )
-          if [[ -n "$EXISTING_ID" ]]; then
-            echo "Updating existing comment $EXISTING_ID"
-            gh api -X PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
-              -f body="$BODY" >/dev/null
-          else
-            echo "Creating new coverage comment on PR #${PR_NUMBER}"
-            gh pr comment "$PR_NUMBER" --body "$BODY"
-          fi
+      # Codecov: posts the diff-coverage PR comment (strictly richer than
+      # what we could build by hand — has base-branch comparison and
+      # links to the dashboard), and persists history so we can see the
+      # metric trend across releases.
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: unit-integration
+          fail_ci_if_error: false   # don't block CI on a transient codecov outage
+          verbose: true
 
       - name: CLI smoke — inspect / generate / validate
         run: |
