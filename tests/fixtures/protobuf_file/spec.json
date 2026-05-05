@@ -1,0 +1,39 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "metrics_events",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["host", "metric_name"]
+      },
+      "metricsSpec": [
+        {"type": "doubleSum", "name": "value_sum", "fieldName": "value"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "topic": "metrics",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka:9092"
+      },
+      "inputFormat": {
+        "type": "protobuf",
+        "protoBytesDecoder": {
+          "type": "file",
+          "descriptor": "/etc/pinot/metrics.desc",
+          "protoMessageType": "Metric"
+        }
+      }
+    }
+  }
+}

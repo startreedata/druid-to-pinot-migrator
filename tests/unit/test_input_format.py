@@ -238,8 +238,11 @@ from migrator.pinot.table_generator import (
     KAFKA_AVRO_REGISTRY_DECODER,
     KAFKA_AVRO_SIMPLE_DECODER,
     KAFKA_JSON_DECODER,
+    KAFKA_PROTOBUF_FILE_DECODER,
+    KAFKA_PROTOBUF_REGISTRY_DECODER,
     PinotTableGenerator,
     avro_decoder_config_from_io,
+    protobuf_decoder_config_from_io,
 )
 
 
@@ -398,3 +401,326 @@ class TestEndToEndAvroStream:
         # The inline schema rides through as a JSON string under the
         # Pinot-specific decoder.prop.schema key.
         assert "stream.kafka.decoder.prop.schema" in sc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Avro schema registry — auth + multi-URL + capacity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAvroSchemaRegistryAuth:
+    def test_basic_auth_user_info_threaded(self):
+        # Camel-case is the spelling Druid >= 0.22 uses.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+                "config": {
+                    "basicAuthCredentialsSource": "USER_INFO",
+                    "basicAuthUserInfo": "u:p",
+                },
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert props["basic.auth.credentials.source"] == "USER_INFO"
+        assert props["basic.auth.user.info"] == "u:p"
+
+    def test_basic_auth_dotted_keys_also_supported(self):
+        # Older Druid configs use the Pinot-style dotted key directly.
+        # We accept both spellings so dpm doesn't force a hand-edit.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+                "config": {
+                    "basic.auth.credentials.source": "USER_INFO",
+                    "basic.auth.user.info": "u:p",
+                },
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert props["basic.auth.credentials.source"] == "USER_INFO"
+        assert props["basic.auth.user.info"] == "u:p"
+
+    def test_urls_array_comma_joined(self):
+        # HA registries: Druid takes ``urls`` array; Pinot takes the
+        # same comma-joined into ``schema.registry.rest.url``.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "urls": ["http://sr-1:8081", "http://sr-2:8081"],
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert props["schema.registry.rest.url"] == \
+            "http://sr-1:8081,http://sr-2:8081"
+
+    def test_url_singular_wins_over_urls_array(self):
+        # When both fields are set (common when migrating off an old
+        # config), the singular form wins — that's the field Druid
+        # treats as authoritative.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://primary:8081",
+                "urls": ["http://other:8081"],
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert props["schema.registry.rest.url"] == "http://primary:8081"
+
+    def test_capacity_threaded(self):
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+                "capacity": 5000,
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert props["schema.registry.cache.capacity"] == "5000"
+
+    def test_no_auth_no_capacity_no_extra_props(self):
+        # Auth-less registries are common in dev — no spurious props
+        # should leak into the output for them.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+            },
+        }}
+        _, props = avro_decoder_config_from_io(io)
+        assert set(props.keys()) == {"schema.registry.rest.url"}
+
+
+class TestAvroStreamAuthFixture:
+    """End-to-end via the avro_stream_auth fixture (multi-URL + auth)."""
+
+    def test_fixture_produces_full_decoder_props(self):
+        raw = json.loads(
+            (FIXTURES / "avro_stream_auth" / "spec.json").read_text()
+        )
+        canonical = _canonical(raw)
+        assert canonical.input_format == "avro"
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        # Multi-URL → comma-joined.
+        assert sc["stream.kafka.decoder.prop.schema.registry.rest.url"] == (
+            "http://schema-registry-1:8081,http://schema-registry-2:8081"
+        )
+        # Auth carried through.
+        assert sc["stream.kafka.decoder.prop.basic.auth.credentials.source"] == "USER_INFO"
+        assert sc["stream.kafka.decoder.prop.basic.auth.user.info"] == "client:s3cret"
+        # Cache capacity.
+        assert sc["stream.kafka.decoder.prop.schema.registry.cache.capacity"] == "1000"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Protobuf streaming — Confluent registry + descriptor file
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestProtobufDecoderConfigFromIo:
+    def test_schema_registry_picks_confluent_decoder(self):
+        io = {"inputFormat": {
+            "type": "protobuf",
+            "protoBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+                "protoMessageType": "MyEvent",
+            },
+        }}
+        klass, props = protobuf_decoder_config_from_io(io)
+        assert klass == KAFKA_PROTOBUF_REGISTRY_DECODER
+        assert props["schema.registry.rest.url"] == "http://sr:8081"
+        # Protobuf-specific: the message type is required by the
+        # Confluent decoder, mapped to ``schemaName``.
+        assert props["schemaName"] == "MyEvent"
+
+    def test_file_decoder_with_descriptor(self):
+        io = {"inputFormat": {
+            "type": "protobuf",
+            "protoBytesDecoder": {
+                "type": "file",
+                "descriptor": "/data/proto.desc",
+                "protoMessageType": "MyEvent",
+            },
+        }}
+        klass, props = protobuf_decoder_config_from_io(io)
+        assert klass == KAFKA_PROTOBUF_FILE_DECODER
+        # Pinot's file-based protobuf decoder uses these EXACT prop
+        # keys; getting the names wrong silently no-ops the decoder.
+        assert props["descriptorFile"] == "/data/proto.desc"
+        assert props["protoClassName"] == "MyEvent"
+
+    def test_registry_inherits_auth_from_helper(self):
+        # The Avro registry-prop helper is shared, so auth on a
+        # protobuf registry config should land in the same Pinot
+        # decoder.prop keys as on Avro.
+        io = {"inputFormat": {
+            "type": "protobuf",
+            "protoBytesDecoder": {
+                "type": "schema_registry",
+                "url": "http://sr:8081",
+                "protoMessageType": "X",
+                "config": {
+                    "basicAuthCredentialsSource": "USER_INFO",
+                    "basicAuthUserInfo": "u:p",
+                },
+            },
+        }}
+        _, props = protobuf_decoder_config_from_io(io)
+        assert props["basic.auth.credentials.source"] == "USER_INFO"
+        assert props["basic.auth.user.info"] == "u:p"
+
+    def test_unknown_decoder_type_falls_back_to_registry(self):
+        io = {"inputFormat": {
+            "type": "protobuf",
+            "protoBytesDecoder": {"type": "weird"},
+        }}
+        klass, _ = protobuf_decoder_config_from_io(io)
+        assert klass == KAFKA_PROTOBUF_REGISTRY_DECODER
+
+    def test_no_protoBytesDecoder_block_returns_registry_with_empty_props(self):
+        # Druid spec without protoBytesDecoder is technically invalid
+        # but operators do this when they're still wiring things up;
+        # we shouldn't crash, just return the default decoder.
+        io = {"inputFormat": {"type": "protobuf"}}
+        klass, props = protobuf_decoder_config_from_io(io)
+        assert klass == KAFKA_PROTOBUF_REGISTRY_DECODER
+        assert props == {}
+
+
+class TestProtobufStreamFixtures:
+    def test_protobuf_stream_registry_fixture(self):
+        raw = json.loads(
+            (FIXTURES / "protobuf_stream" / "spec.json").read_text()
+        )
+        canonical = _canonical(raw)
+        assert canonical.input_format == "protobuf"
+        assert canonical.source_kind == "stream"
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kafka.decoder.class.name"] == KAFKA_PROTOBUF_REGISTRY_DECODER
+        assert sc["stream.kafka.decoder.prop.schemaName"] == "TelemetryEvent"
+        assert (
+            sc["stream.kafka.decoder.prop.schema.registry.rest.url"]
+            == "http://schema-registry-prod:8081"
+        )
+
+    def test_protobuf_file_fixture(self):
+        raw = json.loads(
+            (FIXTURES / "protobuf_file" / "spec.json").read_text()
+        )
+        canonical = _canonical(raw)
+        assert canonical.input_format == "protobuf"
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kafka.decoder.class.name"] == KAFKA_PROTOBUF_FILE_DECODER
+        assert sc["stream.kafka.decoder.prop.descriptorFile"] == \
+            "/etc/pinot/metrics.desc"
+        assert sc["stream.kafka.decoder.prop.protoClassName"] == "Metric"
+
+
+class TestProtobufStreamWarnings:
+    """Normalizer-side warnings for protobuf streams missing config."""
+
+    def _kafka_spec_with_proto(self, **proto_decoder) -> dict:
+        spec = {
+            "type": "kafka",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "x",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["a"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "segmentGranularity": "HOUR", "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "type": "kafka",
+                    "topic": "t",
+                    "consumerProperties": {"bootstrap.servers": "k:9092"},
+                    "inputFormat": {
+                        "type": "protobuf",
+                        "protoBytesDecoder": proto_decoder,
+                    },
+                },
+            },
+        }
+        return spec
+
+    def test_schema_registry_missing_url_warns(self):
+        result = _normalize(self._kafka_spec_with_proto(
+            type="schema_registry", protoMessageType="X",
+        ))
+        assert any(
+            "schema_registry" in w and "url" in w for w in result.warnings
+        )
+
+    def test_schema_registry_missing_protoMessageType_warns(self):
+        result = _normalize(self._kafka_spec_with_proto(
+            type="schema_registry", url="http://sr:8081",
+        ))
+        assert any(
+            "protoMessageType" in w for w in result.warnings
+        )
+
+    def test_file_missing_descriptor_warns(self):
+        result = _normalize(self._kafka_spec_with_proto(
+            type="file", protoMessageType="X",
+        ))
+        assert any(
+            "descriptor" in w.lower() for w in result.warnings
+        )
+
+    def test_file_missing_protoMessageType_warns(self):
+        result = _normalize(self._kafka_spec_with_proto(
+            type="file", descriptor="/foo.desc",
+        ))
+        assert any(
+            "protoMessageType" in w for w in result.warnings
+        )
+
+    def test_unknown_decoder_type_warns(self):
+        result = _normalize(self._kafka_spec_with_proto(type="weird"))
+        assert any(
+            "weird" in w and "schema_registry" in w for w in result.warnings
+        )
+
+    def test_batch_protobuf_does_not_emit_stream_warnings(self):
+        # A batch protobuf spec (not source_kind=stream) shouldn't
+        # trigger the stream-specific warning matrix.
+        spec = {
+            "type": "index_parallel",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "x",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["a"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "segmentGranularity": "DAY", "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "type": "index_parallel",
+                    "inputSource": {"type": "local", "baseDir": "/data"},
+                    "inputFormat": {"type": "protobuf"},
+                },
+            },
+        }
+        result = _normalize(spec)
+        # No proto-stream-specific warnings — the batch path uses
+        # ProtoBufRecordReader, not the Kafka decoder.
+        assert not any(
+            "protoBytesDecoder" in w or "schemaName" in w
+            for w in result.warnings
+        )

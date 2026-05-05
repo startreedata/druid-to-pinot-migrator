@@ -1,0 +1,40 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "telemetry_events",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["service", "host", "region"]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "events"},
+        {"type": "longSum", "name": "latency_sum", "fieldName": "latency_ms"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "topic": "telemetry",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka-prod:9092"
+      },
+      "inputFormat": {
+        "type": "protobuf",
+        "protoBytesDecoder": {
+          "type": "schema_registry",
+          "url": "http://schema-registry-prod:8081",
+          "protoMessageType": "TelemetryEvent"
+        }
+      }
+    }
+  }
+}

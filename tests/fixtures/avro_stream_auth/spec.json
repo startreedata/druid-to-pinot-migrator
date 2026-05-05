@@ -1,0 +1,46 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "secured_clicks",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["user_id", "campaign_id"]
+      },
+      "metricsSpec": [
+        {"type": "count", "name": "events"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "topic": "secured-clicks",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka-prod:9092"
+      },
+      "inputFormat": {
+        "type": "avro_stream",
+        "avroBytesDecoder": {
+          "type": "schema_registry",
+          "urls": [
+            "http://schema-registry-1:8081",
+            "http://schema-registry-2:8081"
+          ],
+          "config": {
+            "basicAuthCredentialsSource": "USER_INFO",
+            "basicAuthUserInfo": "client:s3cret"
+          },
+          "capacity": 1000
+        }
+      }
+    }
+  }
+}

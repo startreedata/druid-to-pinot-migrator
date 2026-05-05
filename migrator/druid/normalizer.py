@@ -230,12 +230,12 @@ class DruidNormalizer:
             ).get("avroBytesDecoder", {})
             decoder_type = (avro_decoder.get("type") or "").lower()
             if decoder_type == "schema_registry":
-                if not avro_decoder.get("url"):
+                if not avro_decoder.get("url") and not avro_decoder.get("urls"):
                     warnings.append(
                         "avro_stream specifies type=schema_registry but no "
-                        "``url`` — Pinot's KafkaConfluentSchemaRegistry"
-                        "AvroMessageDecoder will need the URL added to the "
-                        "generated table config before deploy."
+                        "``url`` / ``urls`` — Pinot's KafkaConfluentSchema"
+                        "RegistryAvroMessageDecoder will need the URL added to "
+                        "the generated table config before deploy."
                     )
             elif decoder_type == "schema_inline":
                 if not avro_decoder.get("schema"):
@@ -247,6 +247,49 @@ class DruidNormalizer:
             else:
                 warnings.append(
                     f"avro_stream avroBytesDecoder.type='{decoder_type}' "
+                    "is unrecognised; defaulting to schema_registry — verify "
+                    "before deploy."
+                )
+
+        # Protobuf streaming has the same silent-failure mode as Avro
+        # (decoder accepts bytes, fails to deserialise, drops messages
+        # with no error). Same warning matrix.
+        if input_format == "protobuf" and source_kind == SourceKind.STREAM.value:
+            proto_decoder = (
+                parsed.io_config.inputFormat or {}
+            ).get("protoBytesDecoder", {})
+            decoder_type = (proto_decoder.get("type") or "").lower()
+            if decoder_type == "schema_registry":
+                if not proto_decoder.get("url") and not proto_decoder.get("urls"):
+                    warnings.append(
+                        "protobuf stream specifies type=schema_registry but "
+                        "no ``url`` / ``urls`` — Pinot's KafkaConfluentSchema"
+                        "RegistryProtoBufMessageDecoder will need the URL added "
+                        "to the generated table config before deploy."
+                    )
+                if not proto_decoder.get("protoMessageType"):
+                    warnings.append(
+                        "protobuf stream type=schema_registry missing "
+                        "``protoMessageType`` — Pinot's Confluent protobuf "
+                        "decoder needs the message type as ``schemaName`` "
+                        "in the generated decoder props."
+                    )
+            elif decoder_type == "file":
+                if not proto_decoder.get("descriptor"):
+                    warnings.append(
+                        "protobuf stream type=file missing ``descriptor`` — "
+                        "Pinot's ProtoBufMessageDecoder needs descriptorFile "
+                        "set to the .desc path or URL."
+                    )
+                if not proto_decoder.get("protoMessageType"):
+                    warnings.append(
+                        "protobuf stream type=file missing "
+                        "``protoMessageType`` — Pinot's decoder needs it as "
+                        "the protoClassName prop."
+                    )
+            else:
+                warnings.append(
+                    f"protobuf stream protoBytesDecoder.type='{decoder_type}' "
                     "is unrecognised; defaulting to schema_registry — verify "
                     "before deploy."
                 )
