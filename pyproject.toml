@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "druid-to-pinot-migrator"
-version = "0.8.0"
+version = "0.9.0"
 description = "Migrate Apache Druid ingestion specs to Apache Pinot artifacts."
 readme = "README.md"
 requires-python = ">=3.11"
