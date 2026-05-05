@@ -1,0 +1,42 @@
+# Example manifest for ``dpm cutover-many``.
+#
+# Demonstrates the schema; not actually wired into the quickstart script
+# (which uses the single-datasource flow). Adapt the entries below to your
+# real cluster + datasource set, then run:
+#
+#   dpm cutover-many --manifest manifest-example.yaml --out ./batch-out
+#
+# Each entry is a single-datasource cutover with its own ``out_dir``
+# subdirectory + checkpoint, so resume + restart-from work per-entry.
+
+defaults:
+  # These cluster URLs apply to every datasource in the batch unless
+  # overridden in a specific entry. The quickstart's compose stack
+  # publishes Druid Coordinator on 8081, Router on 8888, Pinot
+  # Controller on 9000, Pinot Broker on 8099.
+  druid_overlord:    http://localhost:8081
+  druid_router:      http://localhost:8888
+  pinot_controller:  http://localhost:9000
+  pinot_broker:      http://localhost:8099
+
+  # Default backfill window — entries can override per-DS if a specific
+  # datasource was bootstrapped later than the rest.
+  backfill_start_iso: "2024-01-01T00:00:00.000Z"
+  backfill_page_rows: 50000
+
+datasources:
+  - supervisor_id: pageviews_v1
+    datasource:    pageviews
+    pinot_table:   pageviews
+    spec:          ./druid-spec.json
+
+  # Second entry shows per-DS override of a default + skip-flags.
+  # Useful when you've already ingested one datasource manually and
+  # only want this batch run to do parity-check.
+  - supervisor_id: events_v1
+    datasource:    events
+    pinot_table:   events
+    spec:          ./druid-spec.json    # placeholder — point at real spec
+    backfill_start_iso: "2024-06-01T00:00:00.000Z"
+    skip_deploy:   true
+    skip_backfill: true
