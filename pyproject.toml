@@ -54,6 +54,11 @@ dev = [
     "pytest-rerunfailures>=14.0",
     "requests>=2.31",
     "kafka-python>=2.0",
+    # Used only by the live S3 URI-sink test (tests/docker/test_uri_sink_s3_live.py)
+    # to upload fixture data into a MinIO bucket. Keep it dev-only — production
+    # deployments don't need boto3 since dpm itself never makes S3 calls;
+    # the Pinot controller is the S3 client at ingestion time.
+    "boto3>=1.34",
 ]
 
 [project.scripts]
