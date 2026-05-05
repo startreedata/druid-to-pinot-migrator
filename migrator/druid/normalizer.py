@@ -185,13 +185,19 @@ class DruidNormalizer:
         # the case and fall back to JSON for unknown / missing values
         # (Druid's own behaviour mirrors this). ``tsv`` is treated as a
         # csv variant — Pinot's CSVRecordReader handles both via the
-        # delimiter config knob.
+        # delimiter config knob. Avro has two Druid sub-types
+        # (``avro_ocf`` for Object Container Files, ``avro_stream`` for
+        # Kafka with a bytes decoder) — both collapse to canonical
+        # ``avro``; the downstream generator dispatches on the source
+        # kind to pick the right Pinot reader vs decoder.
         raw_format = (
             parsed.io_config.inputFormat or {}
         ).get("type", "")
         input_format = (raw_format or "json").lower()
         if input_format == "tsv":
             input_format = "csv"
+        if input_format in ("avro_ocf", "avro_stream"):
+            input_format = "avro"
         if input_format not in _KNOWN_INPUT_FORMATS:
             warnings.append(
                 f"unknown inputFormat.type '{raw_format}' — "
@@ -212,6 +218,37 @@ class DruidNormalizer:
                     "Pinot's ParquetRecordReader does NOT honour this "
                     "Druid-only flag. Binary columns will round-trip "
                     "as bytes — re-encode upstream or add a transform."
+                )
+
+        # Avro stream specs ride or die on the schema-registry config —
+        # without a URL Pinot's Confluent decoder can't deserialise the
+        # bytes off the wire. Surface this loudly because the failure
+        # mode is silent (table just stays empty).
+        if input_format == "avro" and raw_format.lower() == "avro_stream":
+            avro_decoder = (
+                parsed.io_config.inputFormat or {}
+            ).get("avroBytesDecoder", {})
+            decoder_type = (avro_decoder.get("type") or "").lower()
+            if decoder_type == "schema_registry":
+                if not avro_decoder.get("url"):
+                    warnings.append(
+                        "avro_stream specifies type=schema_registry but no "
+                        "``url`` — Pinot's KafkaConfluentSchemaRegistry"
+                        "AvroMessageDecoder will need the URL added to the "
+                        "generated table config before deploy."
+                    )
+            elif decoder_type == "schema_inline":
+                if not avro_decoder.get("schema"):
+                    warnings.append(
+                        "avro_stream type=schema_inline missing ``schema`` — "
+                        "fill in the inline schema in the generated table "
+                        "config's stream.kafka.decoder.prop.schema entry."
+                    )
+            else:
+                warnings.append(
+                    f"avro_stream avroBytesDecoder.type='{decoder_type}' "
+                    "is unrecognised; defaulting to schema_registry — verify "
+                    "before deploy."
                 )
 
         # ------------------------------------------------------------------

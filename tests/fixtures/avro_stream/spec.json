@@ -1,0 +1,38 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "click_events",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["user_id", "campaign_id", "device"]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "events"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "topic": "click-events",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka-prod:9092"
+      },
+      "inputFormat": {
+        "type": "avro_stream",
+        "avroBytesDecoder": {
+          "type": "schema_registry",
+          "url": "http://schema-registry-prod:8081"
+        }
+      }
+    }
+  }
+}

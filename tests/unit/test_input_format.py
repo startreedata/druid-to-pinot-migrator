@@ -227,3 +227,174 @@ class TestEndToEndParquet:
         assert job["recordReaderSpec"]["dataFormat"] == "json"
         assert "JSONRecordReader" in job["recordReaderSpec"]["className"]
         assert job["pinotFSSpecs"][0]["scheme"] == "file"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Avro: avro_ocf (batch) + avro_stream (Kafka with schema registry)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.pinot.table_generator import (
+    KAFKA_AVRO_REGISTRY_DECODER,
+    KAFKA_AVRO_SIMPLE_DECODER,
+    KAFKA_JSON_DECODER,
+    PinotTableGenerator,
+    avro_decoder_config_from_io,
+)
+
+
+class TestNormalizerAvroSubtypes:
+    def test_avro_ocf_collapses_to_avro(self):
+        # OCF (batch, embedded schema) is the simpler avro variant —
+        # no registry / inline schema needed because each file carries
+        # its own header. Just maps to canonical ``avro``.
+        c = _canonical(_spec("avro_ocf"))
+        assert c.input_format == "avro"
+
+    def test_avro_stream_collapses_to_avro(self):
+        c = _canonical(_spec("avro_stream"))
+        assert c.input_format == "avro"
+
+    def test_avro_stream_missing_url_warns(self):
+        # schema_registry decoder without a URL is a load-bearing
+        # missing field — the operator gets nothing back from the
+        # decoder until they fill it in. Warn loudly.
+        spec = _spec("avro_stream", avroBytesDecoder={"type": "schema_registry"})
+        result = _normalize(spec)
+        assert any(
+            "schema_registry" in w and "url" in w for w in result.warnings
+        ), result.warnings
+
+    def test_avro_stream_with_url_no_warning(self):
+        spec = _spec("avro_stream", avroBytesDecoder={
+            "type": "schema_registry",
+            "url": "http://sr:8081",
+        })
+        result = _normalize(spec)
+        assert not any(
+            "schema_registry" in w and "url" in w for w in result.warnings
+        ), result.warnings
+
+    def test_avro_stream_inline_missing_schema_warns(self):
+        spec = _spec("avro_stream", avroBytesDecoder={"type": "schema_inline"})
+        result = _normalize(spec)
+        assert any(
+            "schema_inline" in w for w in result.warnings
+        ), result.warnings
+
+
+class TestAvroDecoderConfigFromIo:
+    def test_schema_registry_picks_confluent_decoder(self):
+        io = {
+            "inputFormat": {
+                "type": "avro_stream",
+                "avroBytesDecoder": {
+                    "type": "schema_registry",
+                    "url": "http://sr:8081",
+                },
+            },
+        }
+        klass, props = avro_decoder_config_from_io(io)
+        assert klass == KAFKA_AVRO_REGISTRY_DECODER
+        # Pinot expects this exact key — typo'ing it silently produces
+        # a no-op decoder, so lock it in.
+        assert props == {"schema.registry.rest.url": "http://sr:8081"}
+
+    def test_schema_registry_missing_url_yields_empty_props(self):
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {"type": "schema_registry"},
+        }}
+        klass, props = avro_decoder_config_from_io(io)
+        assert klass == KAFKA_AVRO_REGISTRY_DECODER
+        assert props == {}   # Operator must add the URL post-generation
+
+    def test_schema_inline_dict_serialised_as_json(self):
+        # Druid accepts an inline schema as either a JSON string OR a
+        # parsed dict; Pinot's SimpleAvroMessageDecoder needs a string
+        # (it parses it itself). Make sure dpm doesn't shove a dict
+        # into the streamConfigs (which would silently break Pinot).
+        schema_dict = {"type": "record", "name": "X", "fields": []}
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {"type": "schema_inline", "schema": schema_dict},
+        }}
+        klass, props = avro_decoder_config_from_io(io)
+        assert klass == KAFKA_AVRO_SIMPLE_DECODER
+        assert isinstance(props["schema"], str)
+        # Round-trip back through JSON to confirm fidelity.
+        assert json.loads(props["schema"]) == schema_dict
+
+    def test_unknown_decoder_type_falls_back_to_registry(self):
+        # If an operator misspells the avroBytesDecoder.type, default
+        # to the registry decoder (most common case) — they'll see the
+        # missing-URL warning from the normalizer and fix it.
+        io = {"inputFormat": {
+            "type": "avro_stream",
+            "avroBytesDecoder": {"type": "weird_thing_we_do_not_know"},
+        }}
+        klass, _ = avro_decoder_config_from_io(io)
+        assert klass == KAFKA_AVRO_REGISTRY_DECODER
+
+
+class TestEndToEndAvroBatch:
+    def test_avro_ocf_fixture_produces_avro_record_reader(self):
+        raw = json.loads((FIXTURES / "avro_ocf" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        assert canonical.input_format == "avro"
+        job = PinotIngestionGenerator().generate_batch_job(canonical)
+        assert job["recordReaderSpec"]["dataFormat"] == "avro"
+        assert "AvroRecordReader" in job["recordReaderSpec"]["className"]
+        # Source is S3 → S3PinotFS, not LocalPinotFS.
+        assert "S3PinotFS" in job["pinotFSSpecs"][0]["className"]
+
+
+class TestEndToEndAvroStream:
+    def test_avro_stream_fixture_produces_confluent_decoder(self):
+        raw = json.loads((FIXTURES / "avro_stream" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        assert canonical.input_format == "avro"
+        # Source kind must come through as stream — Avro on Kafka.
+        assert canonical.source_kind == "stream"
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        # Decoder swapped from JSON default to the Confluent Avro one.
+        assert sc["stream.kafka.decoder.class.name"] == KAFKA_AVRO_REGISTRY_DECODER
+        # And the schema-registry URL threaded all the way through.
+        assert (
+            sc["stream.kafka.decoder.prop.schema.registry.rest.url"]
+            == "http://schema-registry-prod:8081"
+        )
+        # No accidental JSON decoder keys lingering.
+        assert "JSONMessageDecoder" not in sc["stream.kafka.decoder.class.name"]
+
+    def test_existing_json_kafka_fixture_unchanged(self):
+        # Backward compatibility: the raw_stream Kafka fixture (JSON
+        # decoder) must still produce JSONMessageDecoder in v0.11+.
+        raw = json.loads((FIXTURES / "raw_stream" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        assert canonical.input_format == "json"
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kafka.decoder.class.name"] == KAFKA_JSON_DECODER
+        # And no Avro decoder-prop keys snuck in.
+        assert not any(
+            k.startswith("stream.kafka.decoder.prop.") for k in sc
+        )
+
+    def test_inline_schema_emits_simple_decoder(self):
+        # Build an Avro+Kafka spec on the fly with schema_inline, since
+        # we don't ship a dedicated fixture for it — the runtime path
+        # is what matters.
+        spec = json.loads((FIXTURES / "avro_stream" / "spec.json").read_text())
+        spec["spec"]["ioConfig"]["inputFormat"]["avroBytesDecoder"] = {
+            "type": "schema_inline",
+            "schema": {"type": "record", "name": "X", "fields": []},
+        }
+        canonical = _canonical(spec)
+        table = PinotTableGenerator().generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kafka.decoder.class.name"] == KAFKA_AVRO_SIMPLE_DECODER
+        # The inline schema rides through as a JSON string under the
+        # Pinot-specific decoder.prop.schema key.
+        assert "stream.kafka.decoder.prop.schema" in sc
