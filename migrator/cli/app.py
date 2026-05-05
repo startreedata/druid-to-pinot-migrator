@@ -7,6 +7,7 @@ from migrator.cli.commands import (
     cutover,
     cutover_many,
     deploy,
+    diff_spec,
     doctor,
     extract_offsets,
     extract_spec,
@@ -43,6 +44,8 @@ app.command("cutover-many")(cutover_many.command)
 app.command("translate-lookups")(translate_lookups.command)
 # Pre-flight: connectivity / version / config sanity checks
 app.command("doctor")(doctor.command)
+# Spec evolution: diff between two Druid specs + Pinot implications
+app.command("diff-spec")(diff_spec.command)
 
 
 def main() -> None:

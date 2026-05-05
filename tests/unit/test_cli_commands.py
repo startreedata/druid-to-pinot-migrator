@@ -793,3 +793,94 @@ class TestDoctorCommand:
         ])
         assert result.exit_code == 2
         assert "auth" in result.output.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# diff-spec
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+SAMPLE_DIFF_SPEC = {
+    "type": "kafka",
+    "spec": {
+        "dataSchema": {
+            "dataSource": "events",
+            "timestampSpec": {"column": "timestamp", "format": "millis"},
+            "dimensionsSpec": {"dimensions": ["region"]},
+            "metricsSpec": [],
+            "granularitySpec": {"segmentGranularity": "HOUR", "rollup": False},
+        },
+        "ioConfig": {
+            "type": "kafka",
+            "topic": "events",
+            "consumerProperties": {"bootstrap.servers": "k:9092"},
+        },
+    },
+}
+
+
+class TestDiffSpecCommand:
+    def test_diff_spec_help(self):
+        result = runner.invoke(app, ["diff-spec", "--help"])
+        assert result.exit_code == 0
+
+    def test_diff_spec_no_change_exit_zero(self, tmp_path: Path):
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        a.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        b.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "No semantic change" in result.output
+
+    def test_diff_spec_with_change_renders_pretty_text(self, tmp_path: Path):
+        import copy as _copy
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        a.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        new_spec = _copy.deepcopy(SAMPLE_DIFF_SPEC)
+        new_spec["spec"]["dataSchema"]["dimensionsSpec"]["dimensions"].append("device")
+        b.write_text(json.dumps(new_spec))
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0   # default: doesn't fail on change
+        assert "device" in result.output
+        assert "Pinot implications" in result.output
+
+    def test_diff_spec_exit_on_change_returns_3(self, tmp_path: Path):
+        import copy as _copy
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        a.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        new_spec = _copy.deepcopy(SAMPLE_DIFF_SPEC)
+        new_spec["spec"]["dataSchema"]["dimensionsSpec"]["dimensions"].append("device")
+        b.write_text(json.dumps(new_spec))
+        result = runner.invoke(app, [
+            "diff-spec", str(a), str(b), "--exit-on-change",
+        ])
+        # Custom exit code 3 distinguishes "spec changed" from
+        # "command errored" (2). CI guard scripts can branch on it.
+        assert result.exit_code == 3
+
+    def test_diff_spec_json_output(self, tmp_path: Path):
+        import copy as _copy
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        a.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        new_spec = _copy.deepcopy(SAMPLE_DIFF_SPEC)
+        new_spec["spec"]["dataSchema"]["dataSource"] = "events_v2"
+        b.write_text(json.dumps(new_spec))
+        result = runner.invoke(app, [
+            "diff-spec", str(a), str(b), "--json",
+        ])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["is_empty"] is False
+        assert payload["datasource_name_changed"]["new"] == "events_v2"
+
+    def test_diff_spec_unparseable_input_exits_2(self, tmp_path: Path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("not even json{")
+        good = tmp_path / "good.json"
+        good.write_text(json.dumps(SAMPLE_DIFF_SPEC))
+        result = runner.invoke(app, ["diff-spec", str(bad), str(good)])
+        assert result.exit_code == 2
