@@ -122,6 +122,24 @@ def command(
             "phase anyway (useful for diagnostic dry-runs)."
         ),
     ),
+    no_resume: bool = typer.Option(
+        False, "--no-resume",
+        help=(
+            "Ignore any existing cutover-checkpoint.json under --out and "
+            "run every phase from scratch. By default a re-run picks up "
+            "where the previous run left off (skipping phases marked ok)."
+        ),
+    ),
+    restart_from: str | None = typer.Option(
+        None, "--restart-from",
+        help=(
+            "Re-run from this phase onward, keeping earlier phases' ok "
+            "status from the checkpoint. Phases: extract_offsets, "
+            "plan_hybrid, deploy, backfill, parity. Useful when only a "
+            "later phase needs another attempt — e.g. parity flapped on "
+            "a transient broker error."
+        ),
+    ),
     druid_auth: str | None = typer.Option(
         None, "--druid-auth",
         help=(
@@ -224,6 +242,8 @@ def command(
         skip_backfill=skip_backfill,
         skip_parity=skip_parity,
         abort_on_error=not continue_on_error,
+        resume=not no_resume,
+        restart_from=restart_from,
     )
 
     overlord = DruidOverlordClient(druid_overlord, session=druid_session)

@@ -348,3 +348,232 @@ class TestCutoverParityFailures:
         # The full per-query results are still on the report so callers
         # can render them.
         assert any(not r.passed for r in report.parity)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resumability
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ExplodingDeployer:
+    """Always errors on deploy() — used to make the first run fail at
+    a known phase so the second run has something to resume past."""
+
+    def __init__(self) -> None:
+        self.calls: int = 0
+
+    def deploy(self, artifacts):
+        self.calls += 1
+        raise RuntimeError("simulated deploy failure")
+
+
+class _CountingOverlord(StubOverlord):
+    """Like StubOverlord but counts calls so resume tests can assert
+    'phase did NOT run again' by comparing call counts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.call_count = 0
+
+    def get_supervisor_offsets(self, supervisor_id: str):
+        self.call_count += 1
+        return super().get_supervisor_offsets(supervisor_id)
+
+
+class TestCutoverResumeAfterFailure:
+    def test_first_run_writes_checkpoint_with_completed_phases(
+        self, cfg: CutoverConfig,
+    ):
+        # Run with an exploding deployer — extract_offsets and
+        # plan_hybrid succeed; deploy errors and aborts the rest.
+        run_cutover(
+            cfg,
+            overlord=StubOverlord(),
+            deployer=_ExplodingDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Checkpoint file should exist with extract_offsets+plan_hybrid
+        # marked ok and deploy marked error.
+        ckpt_path = cfg.out_dir / "cutover-checkpoint.json"
+        assert ckpt_path.exists()
+        ck = json.loads(ckpt_path.read_text())
+        assert ck["phases"]["extract_offsets"]["status"] == "ok"
+        assert ck["phases"]["plan_hybrid"]["status"] == "ok"
+        assert ck["phases"]["deploy"]["status"] == "error"
+        # backfill + parity didn't even run, so they're absent.
+        assert "backfill" not in ck["phases"]
+        assert "parity" not in ck["phases"]
+
+    def test_second_run_skips_completed_phases(self, cfg: CutoverConfig):
+        # First run: deploy fails.
+        overlord1 = _CountingOverlord()
+        run_cutover(
+            cfg, overlord=overlord1,
+            deployer=_ExplodingDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        assert overlord1.call_count == 1
+
+        # Second run: same config, but with a working deployer this time.
+        overlord2 = _CountingOverlord()
+        report = run_cutover(
+            cfg, overlord=overlord2,
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Overlord must NOT have been called again — the first run
+        # already completed extract_offsets, and the checkpoint says so.
+        assert overlord2.call_count == 0
+        # extract_offsets and plan_hybrid show up as 'ok' with a
+        # ``resumed from checkpoint`` note.
+        ext = next(s for s in report.steps if s.step == "extract_offsets")
+        assert ext.status == "ok"
+        assert "resumed from checkpoint" in ext.detail
+        plan = next(s for s in report.steps if s.step == "plan_hybrid")
+        assert plan.status == "ok"
+        assert "resumed from checkpoint" in plan.detail
+        # deploy actually ran this time and succeeded.
+        deploy = next(s for s in report.steps if s.step == "deploy")
+        assert deploy.status == "ok"
+        assert "resumed" not in deploy.detail
+        # Final outcome is all-ok.
+        assert report.all_ok
+
+    def test_resume_false_reruns_all_phases(self, cfg: CutoverConfig):
+        # First run completes everything successfully.
+        run_cutover(
+            cfg, overlord=StubOverlord(),
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Second run with resume=False — overlord must be called again.
+        overlord2 = _CountingOverlord()
+        cfg.resume = False
+        run_cutover(
+            cfg, overlord=overlord2,
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        assert overlord2.call_count == 1
+
+    def test_config_change_invalidates_checkpoint(self, cfg: CutoverConfig):
+        # First run completes everything.
+        run_cutover(
+            cfg, overlord=StubOverlord(),
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Change a hashed field — datasource — and run again.
+        cfg.datasource = "different_ds"
+        cfg.pinot_table = "different_ds"
+        # Need the spec to also reference the new datasource so plan
+        # passes; for this test, easier to just rewrite the spec.
+        spec = json.loads(cfg.spec_path.read_text())
+        spec["spec"]["dataSchema"]["dataSource"] = "different_ds"
+        cfg.spec_path.write_text(json.dumps(spec))
+        overlord2 = _CountingOverlord()
+        run_cutover(
+            cfg, overlord=overlord2,
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Overlord called again — the prior checkpoint's hash didn't
+        # match, so it was discarded.
+        assert overlord2.call_count == 1
+
+
+class TestCutoverRestartFrom:
+    def test_restart_from_drops_named_and_later_phases(
+        self, cfg: CutoverConfig,
+    ):
+        # First run completes everything.
+        run_cutover(
+            cfg, overlord=StubOverlord(),
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Second run: --restart-from parity. Earlier phases keep their
+        # 'ok' status; only parity (and any later phase) re-runs.
+        overlord2 = _CountingOverlord()
+        deploy2 = StubDeployer()
+        cfg.restart_from = "parity"
+        report = run_cutover(
+            cfg, overlord=overlord2,
+            deployer=deploy2,
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        # Overlord, deployer not called — those phases are still 'ok'
+        # in the checkpoint and get resumed.
+        assert overlord2.call_count == 0
+        assert len(deploy2.calls) == 0
+        # parity ran (status=ok, no 'resumed' note)
+        parity = next(s for s in report.steps if s.step == "parity")
+        assert parity.status == "ok"
+        assert "resumed" not in parity.detail
+
+
+class TestCutoverCheckpointSchemaMismatch:
+    def test_unrecognised_checkpoint_aborts_run(
+        self, cfg: CutoverConfig,
+    ):
+        # Stage a corrupt checkpoint file under out_dir.
+        cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.out_dir / "cutover-checkpoint.json").write_text(
+            json.dumps({"schema_version": 999, "config_hash": "x", "phases": {}})
+        )
+        # Default cfg has resume=True; orchestrator must refuse rather
+        # than silently start over (which would mask a real format-bump
+        # bug).
+        with pytest.raises(RuntimeError, match="--no-resume"):
+            run_cutover(
+                cfg, overlord=StubOverlord(),
+                deployer=StubDeployer(),
+                pager=StubPager(),
+                pinot_ingest_sink=StubSink(),
+                druid_sql_client=StubSqlClient(druid=True),
+                pinot_sql_client=StubSqlClient(druid=False),
+            )
+
+    def test_no_resume_overrides_corrupt_checkpoint(
+        self, cfg: CutoverConfig,
+    ):
+        cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.out_dir / "cutover-checkpoint.json").write_text("{not json")
+        cfg.resume = False
+        # Should run cleanly and overwrite the bad file.
+        report = run_cutover(
+            cfg, overlord=StubOverlord(),
+            deployer=StubDeployer(),
+            pager=StubPager(),
+            pinot_ingest_sink=StubSink(),
+            druid_sql_client=StubSqlClient(druid=True),
+            pinot_sql_client=StubSqlClient(druid=False),
+        )
+        assert report.all_ok

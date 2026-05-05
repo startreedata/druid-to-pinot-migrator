@@ -550,6 +550,59 @@ class TestCutoverCommand:
         ])
         assert result.exit_code == 2
 
+    def test_cutover_no_resume_flag_threads_through(self, tmp_path: Path):
+        # Verify the --no-resume flag reaches the orchestrator's
+        # CutoverConfig. We don't run a real cutover; we just check
+        # the flag wiring by capturing the cfg passed to run_cutover.
+        spec = FIXTURES / "raw_stream" / "spec.json"
+        captured = {}
+
+        def fake_run_cutover(cfg, **_kwargs):
+            captured["cfg"] = cfg
+            return _ok_cutover_report(tmp_path / "out")
+
+        with patch(
+            "migrator.cli.commands.cutover.run_cutover",
+            side_effect=fake_run_cutover,
+        ):
+            result = runner.invoke(app, [
+                "cutover",
+                "--supervisor-id", "sup1",
+                "--datasource", "ds",
+                "--pinot-table", "ds",
+                "--spec", str(spec),
+                "--out", str(tmp_path / "out"),
+                "--no-resume",
+            ])
+        assert result.exit_code == 0, result.output
+        assert captured["cfg"].resume is False
+        assert captured["cfg"].restart_from is None
+
+    def test_cutover_restart_from_flag_threads_through(self, tmp_path: Path):
+        spec = FIXTURES / "raw_stream" / "spec.json"
+        captured = {}
+
+        def fake_run_cutover(cfg, **_kwargs):
+            captured["cfg"] = cfg
+            return _ok_cutover_report(tmp_path / "out")
+
+        with patch(
+            "migrator.cli.commands.cutover.run_cutover",
+            side_effect=fake_run_cutover,
+        ):
+            result = runner.invoke(app, [
+                "cutover",
+                "--supervisor-id", "sup1",
+                "--datasource", "ds",
+                "--pinot-table", "ds",
+                "--spec", str(spec),
+                "--out", str(tmp_path / "out"),
+                "--restart-from", "parity",
+            ])
+        assert result.exit_code == 0, result.output
+        assert captured["cfg"].resume is True
+        assert captured["cfg"].restart_from == "parity"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # translate-lookups
