@@ -6,6 +6,7 @@ from migrator.cli.commands import (
     backfill_batch,
     cutover,
     deploy,
+    doctor,
     extract_offsets,
     extract_spec,
     generate,
@@ -37,6 +38,8 @@ app.command("parity-check")(parity_check.command)
 app.command("cutover")(cutover.command)
 # Lookups: Druid cluster lookup config → Pinot dim tables
 app.command("translate-lookups")(translate_lookups.command)
+# Pre-flight: connectivity / version / config sanity checks
+app.command("doctor")(doctor.command)
 
 
 def main() -> None:

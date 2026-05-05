@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from migrator.cli.app import app
 from migrator.parity.models import ParityResult
 from migrator.pinot.deployer import DeployReport, DeployResult
+from migrator.preflight import PreflightCheck
 from migrator.realtime.backfill_runner import BackfillResult
 from migrator.realtime.cutover import CutoverReport, CutoverStepResult
 from migrator.realtime.models import KafkaOffsetMap, KafkaPartitionOffset
@@ -631,3 +632,111 @@ class TestTranslateLookupsCommand:
         ])
         assert result.exit_code == 0
         assert (tmp_path / "dim_country_code_to_name").is_dir()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# doctor
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ok(name: str, target: str, detail: str = "ok") -> PreflightCheck:
+    return PreflightCheck(name=name, target=target, ok=True, detail=detail)
+
+
+def _fail(name: str, target: str, detail: str = "failed") -> PreflightCheck:
+    return PreflightCheck(name=name, target=target, ok=False, detail=detail)
+
+
+class TestDoctorCommand:
+    def test_doctor_help(self):
+        result = runner.invoke(app, ["doctor", "--help"])
+        assert result.exit_code == 0
+        assert "preflight" in result.output.lower() or "probe" in result.output.lower()
+
+    def test_doctor_all_green_exits_zero(self):
+        with patch(
+            "migrator.cli.commands.doctor.probe_druid_router",
+            return_value=_ok("druid-router", "http://druid", "version 31.0.0"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_controller",
+            return_value=_ok("pinot-controller", "http://pinot", "version 1.5.0"),
+        ):
+            result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0, result.output
+        assert "Result: 2 ok, 0 failed" in result.output
+
+    def test_doctor_failure_exits_one(self):
+        with patch(
+            "migrator.cli.commands.doctor.probe_druid_router",
+            return_value=_fail("druid-router", "http://druid", "unreachable"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_controller",
+            return_value=_ok("pinot-controller", "http://pinot"),
+        ):
+            result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "1 ok, 1 failed" in result.output
+
+    def test_doctor_optional_probes_only_run_when_flagged(self):
+        # Without --pinot-broker/--datasource/--pinot-tenant, those
+        # probes should not be invoked. We assert by side-channel: the
+        # mocks are NOT patched, so if they ran the test would fail
+        # with a real network call. The Result line confirms 2 checks.
+        with patch(
+            "migrator.cli.commands.doctor.probe_druid_router",
+            return_value=_ok("druid-router", "http://druid"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_controller",
+            return_value=_ok("pinot-controller", "http://pinot"),
+        ):
+            result = runner.invoke(app, ["doctor"])
+        assert "Result: 2 ok" in result.output
+
+    def test_doctor_runs_optional_probes_when_flags_set(self):
+        with patch(
+            "migrator.cli.commands.doctor.probe_druid_router",
+            return_value=_ok("druid-router", "http://druid"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_controller",
+            return_value=_ok("pinot-controller", "http://pinot"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_broker",
+            return_value=_ok("pinot-broker", "http://pinot:8099"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_druid_datasource",
+            return_value=_ok("druid-datasource", "ds", "exists"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_tenant",
+            return_value=_ok("pinot-tenant", "DefaultTenant", "exists"),
+        ):
+            result = runner.invoke(app, [
+                "doctor",
+                "--pinot-broker", "http://pinot:8099",
+                "--datasource", "ds",
+                "--pinot-tenant", "DefaultTenant",
+            ])
+        assert result.exit_code == 0
+        assert "Result: 5 ok, 0 failed" in result.output
+
+    def test_doctor_json_output(self):
+        with patch(
+            "migrator.cli.commands.doctor.probe_druid_router",
+            return_value=_ok("druid-router", "http://druid", "version 31.0.0"),
+        ), patch(
+            "migrator.cli.commands.doctor.probe_pinot_controller",
+            return_value=_fail("pinot-controller", "http://pinot", "HTTP 503"),
+        ):
+            result = runner.invoke(app, ["doctor", "--json"])
+        assert result.exit_code == 1   # any failure → exit 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert len(payload["checks"]) == 2
+        assert payload["checks"][0]["ok"] is True
+        assert payload["checks"][1]["ok"] is False
+
+    def test_doctor_invalid_auth_exits_2(self):
+        result = runner.invoke(app, [
+            "doctor", "--druid-auth", "garbage-no-colon",
+        ])
+        assert result.exit_code == 2
+        assert "auth" in result.output.lower()
