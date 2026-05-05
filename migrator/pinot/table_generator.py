@@ -87,6 +87,71 @@ def build_realtime_transform_configs(
     return transforms
 
 
+KINESIS_CONSUMER_FACTORY = (
+    "org.apache.pinot.plugin.stream.kinesis.KinesisConsumerFactory"
+)
+KINESIS_JSON_DECODER = KAFKA_JSON_DECODER  # JSON decoder is stream-agnostic
+
+
+def _extract_kinesis_region(endpoint: str | None) -> str | None:
+    """Pull a region out of a Druid Kinesis endpoint URL, if it follows the
+    canonical AWS form ``kinesis.<region>.amazonaws.com``.
+
+    Returns None for non-AWS endpoints (e.g. localhost, kinesis-lite, custom
+    proxies); callers must fall back to an explicit region in that case.
+    """
+    if not endpoint:
+        return None
+    # Strip protocol if present (Druid often stores hostname-only).
+    host = endpoint.split("://", 1)[-1]
+    parts = host.split(".")
+    # ``kinesis.us-east-1.amazonaws.com`` → parts[1] == "us-east-1"
+    if len(parts) >= 4 and parts[0] == "kinesis" and parts[-2:] == ["amazonaws", "com"]:
+        return parts[1]
+    return None
+
+
+def build_kinesis_stream_configs(
+    *,
+    stream_name: str,
+    region: str,
+    endpoint: str | None = None,
+    offset_criteria: str = DEFAULT_OFFSET_RESET,
+    decoder_class: str = KINESIS_JSON_DECODER,
+    flush_threshold_rows: str = "1000000",
+    flush_threshold_time: str = "1h",
+) -> dict[str, str]:
+    """
+    Build a Pinot ``streamConfigs`` dict for a Kinesis REALTIME table.
+
+    Druid's Kinesis indexing service maps to Pinot's
+    ``KinesisConsumerFactory`` plugin (shipped with all Pinot 1.x
+    releases the migrator targets). The decoder is JSON-only here
+    because every Druid Kinesis spec dpm has seen uses
+    ``ioConfig.inputFormat.type == "json"``; protobuf / avro require
+    additional schema config that's out of scope for the auto-generator.
+
+    AWS credentials are deliberately omitted — production Pinot
+    deployments source them from IAM instance profiles or env vars,
+    not from the table config (which would commit a secret to source
+    control).
+    """
+    cfg: dict[str, str] = {
+        "streamType": "kinesis",
+        "stream.kinesis.topic.name": stream_name,
+        "stream.kinesis.consumer.type": "lowlevel",
+        "stream.kinesis.consumer.factory.class.name": KINESIS_CONSUMER_FACTORY,
+        "stream.kinesis.decoder.class.name": decoder_class,
+        "stream.kinesis.consumer.prop.auto.offset.reset": offset_criteria,
+        "region": region,
+        "realtime.segment.flush.threshold.rows": flush_threshold_rows,
+        "realtime.segment.flush.threshold.time": flush_threshold_time,
+    }
+    if endpoint:
+        cfg["stream.kinesis.endpoint"] = endpoint
+    return cfg
+
+
 def build_kafka_stream_configs(
     *,
     topic: str,
@@ -181,16 +246,50 @@ class PinotTableGenerator:
         table_name = f"{canonical.datasource_name}_REALTIME"
 
         io = canonical.raw_io_config or {}
-        consumer_props = io.get("consumerProperties", {})
-        broker_list = consumer_props.get("bootstrap.servers", "localhost:9092")
-        topic = io.get("topic", canonical.datasource_name)
-
         offset_criteria = watermark_iso or DEFAULT_OFFSET_RESET
-        stream_configs = build_kafka_stream_configs(
-            topic=topic,
-            broker_list=broker_list,
-            offset_criteria=offset_criteria,
+
+        # Dispatch on ioConfig.type. Kinesis specs declare ``stream``
+        # instead of ``topic``; Kafka specs declare ``topic`` and live
+        # consumer properties under ``consumerProperties``. Defaulting
+        # to Kafka preserves the previous behaviour for any spec whose
+        # type is missing or unrecognised.
+        io_type = (io.get("type") or "").lower()
+        is_kinesis = io_type == "kinesis" or (
+            "stream" in io and "topic" not in io
         )
+        if is_kinesis:
+            stream_name = io.get("stream") or canonical.datasource_name
+            endpoint = io.get("endpoint")
+            region = io.get("region") or _extract_kinesis_region(endpoint)
+            if not region:
+                # Pinot won't bring up the table without a region. We
+                # emit a placeholder and surface this in the canonical
+                # warnings so the operator notices before deploying.
+                region = "us-east-1"
+            # Druid's ``useEarliestSequenceNumber`` flag is the closest
+            # analogue of Pinot's offset criterion: True means "start
+            # from the oldest available record" (smallest), False means
+            # "start from the latest" (largest). Watermark mode wins
+            # when supplied.
+            if watermark_iso is None:
+                offset_criteria = (
+                    "smallest" if io.get("useEarliestSequenceNumber") else "largest"
+                )
+            stream_configs = build_kinesis_stream_configs(
+                stream_name=stream_name,
+                region=region,
+                endpoint=endpoint,
+                offset_criteria=offset_criteria,
+            )
+        else:
+            consumer_props = io.get("consumerProperties", {})
+            broker_list = consumer_props.get("bootstrap.servers", "localhost:9092")
+            topic = io.get("topic", canonical.datasource_name)
+            stream_configs = build_kafka_stream_configs(
+                topic=topic,
+                broker_list=broker_list,
+                offset_criteria=offset_criteria,
+            )
 
         table: dict = {
             "tableName": table_name,

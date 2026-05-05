@@ -217,3 +217,147 @@ class TestRealtimeTableWithTransforms:
         # placeholder; that would force callers who add their own
         # ingestionConfig to deep-merge instead of just setting it).
         assert "ingestionConfig" not in table
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kinesis streamConfigs
+# ─────────────────────────────────────────────────────────────────────────────
+
+from migrator.pinot.table_generator import (
+    KINESIS_CONSUMER_FACTORY,
+    _extract_kinesis_region,
+    build_kinesis_stream_configs,
+)
+
+
+class TestExtractKinesisRegion:
+    def test_extracts_from_canonical_aws_endpoint(self):
+        assert _extract_kinesis_region("kinesis.us-east-1.amazonaws.com") == "us-east-1"
+        assert _extract_kinesis_region("kinesis.eu-west-2.amazonaws.com") == "eu-west-2"
+
+    def test_strips_protocol(self):
+        assert (
+            _extract_kinesis_region("https://kinesis.ap-southeast-1.amazonaws.com")
+            == "ap-southeast-1"
+        )
+
+    def test_returns_none_for_non_aws_endpoints(self):
+        # localhost-style proxies, kinesalite, or custom endpoints
+        # don't follow the AWS canonical form — caller must supply
+        # region explicitly.
+        assert _extract_kinesis_region("localhost:4567") is None
+        assert _extract_kinesis_region("http://kinesalite:4567") is None
+        assert _extract_kinesis_region("kinesis.example.com") is None
+
+    def test_returns_none_for_empty(self):
+        assert _extract_kinesis_region(None) is None
+        assert _extract_kinesis_region("") is None
+
+
+class TestBuildKinesisStreamConfigs:
+    def test_minimum_required_fields(self):
+        cfg = build_kinesis_stream_configs(
+            stream_name="payments", region="us-east-1",
+        )
+        assert cfg["streamType"] == "kinesis"
+        assert cfg["stream.kinesis.topic.name"] == "payments"
+        assert cfg["region"] == "us-east-1"
+        assert cfg["stream.kinesis.consumer.factory.class.name"] == KINESIS_CONSUMER_FACTORY
+        # No endpoint key when not supplied — Pinot defaults to AWS Kinesis.
+        assert "stream.kinesis.endpoint" not in cfg
+
+    def test_endpoint_threaded_through(self):
+        cfg = build_kinesis_stream_configs(
+            stream_name="payments", region="us-east-1",
+            endpoint="https://kinesalite:4567",
+        )
+        assert cfg["stream.kinesis.endpoint"] == "https://kinesalite:4567"
+
+    def test_offset_criteria_overridable(self):
+        cfg = build_kinesis_stream_configs(
+            stream_name="t", region="us-east-1",
+            offset_criteria="2024-03-01T00:00:00.000Z",
+        )
+        assert (
+            cfg["stream.kinesis.consumer.prop.auto.offset.reset"]
+            == "2024-03-01T00:00:00.000Z"
+        )
+
+    def test_no_aws_credentials_in_output(self):
+        # Critical: production Pinot deployments source AWS creds from
+        # IAM / env, not from the table config (committing them would
+        # leak secrets). Make sure the builder never accidentally adds
+        # an access-key field.
+        cfg = build_kinesis_stream_configs(stream_name="t", region="us-east-1")
+        for key in cfg:
+            assert "access" not in key.lower()
+            assert "secret" not in key.lower()
+
+
+class TestKinesisRealtimeGeneration:
+    def setup_method(self):
+        self.gen = PinotTableGenerator()
+
+    def test_kinesis_spec_emits_kinesis_stream_type(self):
+        canonical = _canonical_from_fixture("kinesis_stream")
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["streamType"] == "kinesis"
+        # No kafka keys leak into a kinesis config.
+        assert not any(k.startswith("stream.kafka.") for k in sc)
+
+    def test_kinesis_topic_name_from_stream_field(self):
+        # Druid stores the stream name in ``ioConfig.stream`` (not
+        # ``ioConfig.topic``); the generator must read the right key.
+        canonical = _canonical_from_fixture("kinesis_stream")
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kinesis.topic.name"] == "payment-events-prod"
+
+    def test_kinesis_region_extracted_from_endpoint(self):
+        canonical = _canonical_from_fixture("kinesis_stream")
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["region"] == "us-east-1"
+        assert sc["stream.kinesis.endpoint"] == "kinesis.us-east-1.amazonaws.com"
+
+    def test_kinesis_offset_reset_largest_when_useEarliest_false(self):
+        # Fixture has useEarliestSequenceNumber=false → 'largest'.
+        canonical = _canonical_from_fixture("kinesis_stream")
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kinesis.consumer.prop.auto.offset.reset"] == "largest"
+
+    def test_kinesis_offset_reset_smallest_when_useEarliest_true(self):
+        canonical = _canonical_from_fixture("kinesis_stream")
+        # Mutate the canonical's raw_io_config to flip the flag — easier
+        # than maintaining a parallel fixture.
+        canonical.raw_io_config["useEarliestSequenceNumber"] = True
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["stream.kinesis.consumer.prop.auto.offset.reset"] == "smallest"
+
+    def test_kinesis_watermark_iso_overrides_offset(self):
+        # Hybrid mode: the watermark ISO supplied explicitly always
+        # wins over the spec's useEarliestSequenceNumber default.
+        canonical = _canonical_from_fixture("kinesis_stream")
+        table = self.gen.generate_realtime(
+            canonical, watermark_iso="2024-03-01T00:00:00.000Z",
+        )
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert (
+            sc["stream.kinesis.consumer.prop.auto.offset.reset"]
+            == "2024-03-01T00:00:00.000Z"
+        )
+
+    def test_kinesis_falls_back_to_default_region_with_warning_safe(self):
+        # When endpoint is non-AWS and no explicit region in raw_io,
+        # the generator emits us-east-1 as a placeholder rather than
+        # failing — operators who care can override post-generation.
+        canonical = _canonical_from_fixture("kinesis_stream")
+        canonical.raw_io_config["endpoint"] = "kinesalite:4567"
+        canonical.raw_io_config.pop("region", None)
+        table = self.gen.generate_realtime(canonical)
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        # Placeholder region — operators should set this.
+        assert sc["region"] == "us-east-1"
