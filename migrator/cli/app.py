@@ -16,6 +16,7 @@ from migrator.cli.commands import (
     normalize,
     parity_check,
     plan_hybrid,
+    recommend,
     translate_lookups,
     validate,
 )
@@ -46,6 +47,8 @@ app.command("translate-lookups")(translate_lookups.command)
 app.command("doctor")(doctor.command)
 # Spec evolution: diff between two Druid specs + Pinot implications
 app.command("diff-spec")(diff_spec.command)
+# Indexing + aggregator recommendations from a Druid spec
+app.command("recommend")(recommend.command)
 
 
 def main() -> None:
