@@ -24,6 +24,21 @@ What this test covers that the file:// test does not
 - The dpm sink itself stays control-plane-only — boto3 (the test
   uploader) writes the bytes to MinIO, dpm only POSTs the URL.
 
+Why there's no gs:// twin
+─────────────────────────
+We tried — see ``test_backfill_runner.py::test_uri_prefix_composition_is_scheme_agnostic``
+for the dpm-side gs:// coverage that DOES exist. The blocker for the
+end-to-end version is ``GcsPinotFS`` in Pinot 1.x: the plugin's HTTP
+client hard-codes ``storage.googleapis.com`` and ignores
+``STORAGE_EMULATOR_HOST``, so a fake-gcs-server in the local network
+never sees the request. Redirecting it would require either an HTTPS
+intercepting proxy with a custom CA in the controller's truststore
+(yak), or a real GCP project + service-account secret in CI (cost +
+secrets-management). Either is worth doing once the rest of v1.0
+ships; for now the dpm side is unit-tested and the Pinot side is
+trusted to behave the same for ``gs://`` as it does for the
+end-to-end-tested ``s3://``.
+
 Skipped unless ``LIVE_DOCKER_TESTS=1``.
 """
 
