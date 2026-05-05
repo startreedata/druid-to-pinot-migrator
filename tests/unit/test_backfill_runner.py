@@ -363,6 +363,44 @@ class TestPinotIngestFromUriSink:
         # Trailing slash on prefix gets normalised; basename appended.
         assert qs["sourceURIStr"][0] == "s3://my-bucket/staging/page-000000.json"
 
+    @pytest.mark.parametrize(
+        "uri_prefix, expected",
+        [
+            # s3:// — exercised end-to-end against MinIO in the live suite.
+            ("s3://my-bucket/staging/", "s3://my-bucket/staging/page-000000.json"),
+            ("s3://my-bucket/staging",  "s3://my-bucket/staging/page-000000.json"),
+            # gs:// — only unit-tested. The Pinot 1.x GcsPinotFS plugin
+            # ignores STORAGE_EMULATOR_HOST and won't talk to a local
+            # fake-gcs-server, so end-to-end coverage requires a real GCP
+            # project. The dpm side is just URL composition though, and
+            # this assertion locks down the contract: a gs:// prefix
+            # produces a gs:// sourceURI with the file basename appended.
+            ("gs://my-bucket/staging/", "gs://my-bucket/staging/page-000000.json"),
+            ("gs://my-bucket/staging",  "gs://my-bucket/staging/page-000000.json"),
+            # Bare http(s):// — the URI sink doesn't care about scheme;
+            # whatever PinotFS plugin is registered for it on the
+            # controller side handles the fetch.
+            ("https://example.com/data/", "https://example.com/data/page-000000.json"),
+            # Custom scheme — also passed through verbatim. Useful for
+            # operator-deployed PinotFS plugins (azure://, hdfs://, …).
+            ("azure://acct/container/", "azure://acct/container/page-000000.json"),
+        ],
+    )
+    def test_uri_prefix_composition_is_scheme_agnostic(
+        self, tmp_path: Path, uri_prefix: str, expected: str,
+    ):
+        page = tmp_path / "page-000000.json"
+        page.write_text("{}\n")
+        session = _SpySession()
+        sink = PinotIngestFromUriSink(
+            "http://pinot:9000", session=session, uri_prefix=uri_prefix,
+        )
+        sink.ingest_file(page, "ds")
+        from urllib.parse import parse_qs, urlparse
+        url, _ = session.posts[0]
+        qs = parse_qs(urlparse(url).query)
+        assert qs["sourceURIStr"][0] == expected
+
     def test_does_not_upload_file_body(self, tmp_path: Path):
         # The control-plane-only contract: dpm POSTs URL+query only, no
         # body. Specifically, no `files=` (multipart upload) and no
