@@ -100,8 +100,9 @@ jobs:
           docker ps -a
           echo
           for container in migtest-coordinator migtest-pinot-controller \
-                           migtest-pinot-server authtest-coordinator \
-                           authtest-pinot-controller authtest-pinot-broker; do
+                           migtest-pinot-server migtest-minio migtest-minio-init \
+                           authtest-coordinator authtest-pinot-controller \
+                           authtest-pinot-broker; do
             if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then
               echo "=== $container (last 200 lines) ==="
               docker logs --tail=200 "$container" 2>&1 || true
