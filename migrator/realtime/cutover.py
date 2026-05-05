@@ -41,12 +41,20 @@ from migrator.realtime.backfill_runner import (
     PinotIngestSink,
     run_backfill,
 )
+from migrator.realtime.checkpoint import (
+    PHASES,
+    Checkpoint,
+    CheckpointSchemaMismatch,
+    hash_config,
+    load_checkpoint,
+    save_checkpoint,
+)
 from migrator.realtime.hybrid_planner import (
     plan_hybrid_migration,
     write_hybrid_plan,
 )
 from migrator.realtime.models import KafkaOffsetMap
-from migrator.realtime.offset_io import save_offset_map
+from migrator.realtime.offset_io import load_offset_map, save_offset_map
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +93,19 @@ class CutoverConfig:
     # keeps going (useful for diagnostic dry-runs). Default True
     # mirrors what an operator wants from a real cutover.
     abort_on_error: bool = True
+
+    # ── Resumability ──────────────────────────────────────────────────────
+    # When True, a phase already marked "ok" in the on-disk checkpoint
+    # is skipped on this run; downstream phases run as normal. Default
+    # True so re-running ``dpm cutover`` after a failure picks up where
+    # it left off. Pass ``--no-resume`` (sets this False) to force every
+    # phase to run again — useful when the operator wants a clean redo
+    # without manually deleting the out_dir.
+    resume: bool = True
+    # Discard checkpoint state for this phase and every phase after it
+    # before the run starts. Lets an operator say "everything earlier
+    # is fine, but re-run parity from scratch" without nuking the rest.
+    restart_from: str | None = None
 
 
 @dataclass
@@ -166,14 +187,62 @@ def run_cutover(
 
     aborted = False
 
+    # ── Checkpoint setup ──────────────────────────────────────────────────
+    # Compute the config-hash once: we use it both to decide whether an
+    # existing checkpoint is reusable and to stamp the checkpoint we'll
+    # write. ``--no-resume`` (resume=False) discards any prior state.
+    new_hash = hash_config(cfg)
+    ckpt: Checkpoint | None = None
+    if cfg.resume:
+        try:
+            ckpt = load_checkpoint(cfg.out_dir)
+        except CheckpointSchemaMismatch as exc:
+            # Don't silently start fresh on an unrecognised file —
+            # surface the conflict so the operator can decide.
+            raise RuntimeError(
+                f"refusing to resume: {exc}. "
+                "Pass --no-resume to start over and overwrite the file."
+            ) from exc
+        if ckpt is not None and ckpt.config_hash != new_hash:
+            # Config changed since the previous run — keys like
+            # supervisor_id / datasource / spec contents would make any
+            # carried-over state nonsensical. Discard rather than risk
+            # applying the wrong plan.
+            ckpt = None
+    if ckpt is None:
+        ckpt = Checkpoint(config_hash=new_hash)
+    if cfg.restart_from:
+        ckpt.discard_from(cfg.restart_from)
+    save_checkpoint(ckpt, cfg.out_dir)
+
     def _step(step: str) -> bool:
-        """Append a 'skipped' record for a step we're not running and
-        return whether the step should actually execute."""
+        """Append a record for a step we're not running and return
+        whether the step should actually execute.
+
+        Three "not running" cases, in priority order:
+          1. ``aborted`` after a previous error (status="skipped").
+          2. Already complete in the checkpoint (status="ok", with a
+             ``resumed`` note in the detail so the report makes the
+             skip-with-success state obvious).
+          3. None of the above — caller runs the step.
+        """
         nonlocal aborted
         if aborted:
             report.steps.append(CutoverStepResult(
                 step=step, status="skipped",
                 detail="aborted after a previous error",
+            ))
+            return False
+        if ckpt.is_complete(step):
+            ph = ckpt.phases[step]
+            report.steps.append(CutoverStepResult(
+                step=step, status="ok",
+                detail=(
+                    f"resumed from checkpoint "
+                    f"(originally completed at {ph.completed_at}): "
+                    f"{ph.detail}"
+                ),
+                artifact=ph.artifact,
             ))
             return False
         return True
@@ -184,8 +253,13 @@ def run_cutover(
         report.steps.append(CutoverStepResult(
             step=step, status=status, detail=detail, artifact=artifact,
         ))
-        if status == "error" and cfg.abort_on_error:
-            aborted = True
+        if status == "ok":
+            ckpt.mark_ok(step, detail=detail, artifact=artifact)
+        elif status == "error":
+            ckpt.mark_error(step, detail=detail)
+            if cfg.abort_on_error:
+                aborted = True
+        save_checkpoint(ckpt, cfg.out_dir)
 
     # ── 1. Extract watermark ──────────────────────────────────────────────
     offset_map: KafkaOffsetMap | None = None
@@ -201,8 +275,18 @@ def run_cutover(
             )
         except Exception as exc:  # noqa: BLE001
             _record("extract_offsets", "error", detail=str(exc))
+    elif ckpt.is_complete("extract_offsets"):
+        # Resume: rehydrate offset_map from the on-disk artifact so
+        # downstream phases (plan_hybrid, backfill end-ISO) work
+        # without needing the overlord call again.
+        offsets_path = cfg.out_dir / "offsets.json"
+        if offsets_path.exists():
+            offset_map = load_offset_map(offsets_path)
 
     # ── 2. Plan hybrid ────────────────────────────────────────────────────
+    # canonical is needed by parity even if plan_hybrid is resumed-skipped,
+    # so always recompute (cheap: one JSON parse + normalize). Saves
+    # callers from having to persist + reload the canonical model.
     canonical: CanonicalMigrationModel | None = None
     plan_dir = cfg.out_dir / "hybrid"
     if _step("plan_hybrid"):
@@ -221,6 +305,17 @@ def run_cutover(
             )
         except Exception as exc:  # noqa: BLE001
             _record("plan_hybrid", "error", detail=str(exc))
+    elif ckpt.is_complete("plan_hybrid"):
+        # Resume: re-derive canonical from the spec (deterministic) for
+        # the parity phase to use. The on-disk plan_dir is already
+        # populated from the earlier run.
+        try:
+            canonical = _load_canonical(cfg.spec_path)
+        except Exception:  # noqa: BLE001
+            # If the spec is now unreadable, downstream phases that
+            # need ``canonical`` (parity) will surface the failure
+            # with their own error messages.
+            canonical = None
 
     # ── 3. Deploy ─────────────────────────────────────────────────────────
     if cfg.skip_deploy:
