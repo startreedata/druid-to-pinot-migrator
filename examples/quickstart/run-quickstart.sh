@@ -72,15 +72,26 @@ cleanup() {
 trap cleanup EXIT
 
 # ───── 1. Bring up cluster ───────────────────────────────────────────────────
-bold "[1/7] Starting Druid + Pinot docker stack"
+bold "[1/9] Starting Druid + Pinot docker stack"
 ( cd "$HERE" && $DC up -d --wait )
 
+# ───── 1b. Preflight (dpm doctor) ────────────────────────────────────────────
+# Demonstrates the v0.10.0 doctor command — fast HTTP-only probes that
+# catch cluster-config problems before a long migration would discover
+# them mid-flight. Same probes the operator would run on a real env.
+bold "[2/9] Preflight (dpm doctor)"
+( cd "$ROOT" && "${DPM[@]}" doctor \
+    --druid-router "$DRUID_ROUTER" \
+    --druid-coordinator "$DRUID_COORD" \
+    --pinot-controller "$PINOT_CTRL" \
+    --pinot-broker "$PINOT_BROKER" )
+
 # ───── 2. Generate sample data ───────────────────────────────────────────────
-bold "[2/7] Generating sample dataset (5,000 events)"
+bold "[3/9] Generating sample dataset (5,000 events)"
 python3 "$HERE/data/generate_data.py"
 
 # ───── 3. Ingest into Druid ──────────────────────────────────────────────────
-bold "[3/7] Submitting Druid ingestion task"
+bold "[4/9] Submitting Druid ingestion task"
 TASK_ID=$(curl -sf -X POST -H "Content-Type: application/json" \
   --data @"$HERE/druid-spec.json" \
   "$DRUID_ROUTER/druid/indexer/v1/task" | python3 -c "import json,sys; print(json.load(sys.stdin)['task'])")
@@ -119,14 +130,22 @@ except Exception:
 done
 
 # ───── 4. Run dpm generate ───────────────────────────────────────────────────
-bold "[4/7] Running 'dpm generate' to produce Pinot artifacts"
+bold "[5/9] Running 'dpm generate' to produce Pinot artifacts"
 rm -rf "$OUT_DIR"
 ( cd "$ROOT" && "${DPM[@]}" generate "$HERE/druid-spec.json" --out "$OUT_DIR" )
 cyan "  generated files:"
 ls -1 "$OUT_DIR"
 
+# ───── 4b. Show recommendations (dpm recommend) ──────────────────────────────
+# v0.10.0 recommend command — surfaces star-tree, sketch-aggregator,
+# range-index, and id-like inverted/bloom suggestions derived from the
+# canonical model. Operators paste the config_hint snippets into their
+# generated table config to lift query latency.
+bold "[6/9] Pinot indexing recommendations (dpm recommend)"
+( cd "$ROOT" && "${DPM[@]}" recommend "$HERE/druid-spec.json" )
+
 # ───── 5. Push schema + table to Pinot ───────────────────────────────────────
-bold "[5/7] Deploying schema and table to Pinot"
+bold "[7/9] Deploying schema and table to Pinot"
 curl -sf -X POST -H "Content-Type: application/json" \
   --data @"$OUT_DIR/schema.json" \
   "$PINOT_CTRL/schemas" >/dev/null && green "  schema created"
@@ -136,7 +155,7 @@ curl -sf -X POST -H "Content-Type: application/json" \
   "$PINOT_CTRL/tables" >/dev/null && green "  table created"
 
 # ───── 6. Ingest into Pinot ──────────────────────────────────────────────────
-bold "[6/7] Ingesting source data into Pinot"
+bold "[8/9] Ingesting source data into Pinot"
 BATCH_CFG='{"inputFormat":"json","recordReaderSpec":{"dataFormat":"json","className":"org.apache.pinot.plugin.inputformat.json.JSONRecordReader"}}'
 BATCH_CFG_ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$BATCH_CFG")
 curl -sf -X POST \
@@ -145,7 +164,7 @@ curl -sf -X POST \
   >/dev/null && green "  ingestFromFile accepted"
 
 # ───── 7. Validate ───────────────────────────────────────────────────────────
-bold "[7/7] Running parity validation"
+bold "[9/9] Running parity validation"
 python3 "$HERE/validate.py"
 
 green "\n✓ Quickstart complete."

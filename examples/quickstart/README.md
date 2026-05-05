@@ -55,13 +55,15 @@ cd examples/quickstart
 What you'll see:
 
 ```
-[1/7] Starting Druid + Pinot docker stack
-[2/7] Generating sample dataset (5,000 events)
-[3/7] Submitting Druid ingestion task
-[4/7] Running 'dpm generate' to produce Pinot artifacts
-[5/7] Deploying schema and table to Pinot
-[6/7] Ingesting source data into Pinot
-[7/7] Running parity validation
+[1/9] Starting Druid + Pinot docker stack
+[2/9] Preflight (dpm doctor)
+[3/9] Generating sample dataset (5,000 events)
+[4/9] Submitting Druid ingestion task
+[5/9] Running 'dpm generate' to produce Pinot artifacts
+[6/9] Pinot indexing recommendations (dpm recommend)
+[7/9] Deploying schema and table to Pinot
+[8/9] Ingesting source data into Pinot
+[9/9] Running parity validation
 
 === Druid → Pinot Quickstart Parity Check ===
 
@@ -297,3 +299,64 @@ state from scratch on each run (volumes are removed at teardown).
 
 For deeper migration patterns and edge cases, see the
 [full tutorial set](../../docs/index.md).
+
+---
+
+## Try the v0.10.0 commands
+
+After `KEEP_RUNNING=1 ./run-quickstart.sh`, the cluster stays up so you can
+exercise the new ``dpm`` commands against real data.
+
+### `dpm doctor` — preflight
+
+```bash
+dpm doctor \
+  --druid-router http://localhost:8888 \
+  --druid-coordinator http://localhost:8081 \
+  --pinot-controller http://localhost:9000 \
+  --pinot-broker http://localhost:8099 \
+  --datasource pageviews \
+  --pinot-tenant DefaultTenant
+```
+
+Verifies reachability + version of every component plus that the named
+datasource and tenant actually exist. Exit 1 on any failure.
+
+### `dpm recommend` — index/aggregator suggestions
+
+```bash
+dpm recommend examples/quickstart/druid-spec.json
+```
+
+Outputs Pinot-side optimisations derived from the canonical model:
+star-tree config, sorted column, range index on numeric metrics,
+inverted/bloom filter on id-like dims. Pass `--json` for the
+``config_hint`` snippets you can paste into your generated table config.
+
+### `dpm diff-spec` — what changed?
+
+Edit the spec (e.g. add a dimension):
+
+```bash
+cp druid-spec.json druid-spec-v2.json
+# edit druid-spec-v2.json to add a "device" dimension
+
+dpm diff-spec druid-spec.json druid-spec-v2.json
+```
+
+The output lists structural changes plus actionable Pinot implications
+("schema needs PUT: 1 added, 0 removed, 0 type-changed columns").
+Add `--exit-on-change` in CI to gate "spec must not change unexpectedly".
+
+### `dpm cutover-many` — multi-datasource batch
+
+For migrating many datasources at once. See
+[examples/quickstart/manifest-example.yaml](manifest-example.yaml) for
+the manifest schema; usage:
+
+```bash
+dpm cutover-many --manifest manifest-example.yaml --out ./batch-out
+```
+
+Each datasource gets its own subdirectory + checkpoint, so resume
+works per-entry. The aggregate result lands in `./batch-out/batch-report.json`.
