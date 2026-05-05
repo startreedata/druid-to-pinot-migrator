@@ -29,6 +29,14 @@ _COMPLEX_METRIC_TYPES = frozenset(
 
 _STREAM_IO_TYPES = frozenset(["kafka", "kinesis"])
 
+# Druid inputFormat.type → canonical input_format string. Pinot's
+# matching RecordReader plugin is selected from this in the ingestion
+# generator. Names kept lowercase so case differences in operator-
+# written specs don't cause a fallback to JSON.
+_KNOWN_INPUT_FORMATS = frozenset([
+    "json", "parquet", "avro", "orc", "csv", "tsv", "protobuf",
+])
+
 # Standard timestamp formats the tool handles natively
 _KNOWN_TIMESTAMP_FORMATS = frozenset([
     "auto", "iso", "millis", "posix", "seconds", "micro", "nano",
@@ -171,6 +179,42 @@ class DruidNormalizer:
             source_kind = SourceKind.BATCH.value
 
         # ------------------------------------------------------------------
+        # Input format (json / parquet / avro / orc / csv / protobuf)
+        # ------------------------------------------------------------------
+        # Druid stores it under ioConfig.inputFormat.type. We normalise
+        # the case and fall back to JSON for unknown / missing values
+        # (Druid's own behaviour mirrors this). ``tsv`` is treated as a
+        # csv variant — Pinot's CSVRecordReader handles both via the
+        # delimiter config knob.
+        raw_format = (
+            parsed.io_config.inputFormat or {}
+        ).get("type", "")
+        input_format = (raw_format or "json").lower()
+        if input_format == "tsv":
+            input_format = "csv"
+        if input_format not in _KNOWN_INPUT_FORMATS:
+            warnings.append(
+                f"unknown inputFormat.type '{raw_format}' — "
+                "defaulting to JSON. Generated Pinot batch-job "
+                "RecordReader may need manual adjustment."
+            )
+            input_format = "json"
+
+        # Parquet binaryAsString=true is a known compatibility footgun —
+        # Druid silently coerces binary columns to strings while Pinot's
+        # ParquetRecordReader respects the original schema. Surface it
+        # so the operator notices before discovering data drift.
+        if input_format == "parquet":
+            parquet_cfg = parsed.io_config.inputFormat or {}
+            if parquet_cfg.get("binaryAsString"):
+                warnings.append(
+                    "Parquet inputFormat has binaryAsString=true; "
+                    "Pinot's ParquetRecordReader does NOT honour this "
+                    "Druid-only flag. Binary columns will round-trip "
+                    "as bytes — re-encode upstream or add a transform."
+                )
+
+        # ------------------------------------------------------------------
         # partitionsSpec — surface as unsupported feature note
         # ------------------------------------------------------------------
         tuning = parsed.raw_sections.get("tuningConfig", {})
@@ -241,6 +285,7 @@ class DruidNormalizer:
             transforms=transforms,
             granularity=granularity,
             unsupported_features=unsupported,
+            input_format=input_format,
             raw_io_config=parsed.raw_io_config if parsed.raw_io_config else parsed.io_config.model_dump(),
             notes=warnings,
         )

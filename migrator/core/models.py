@@ -81,6 +81,12 @@ class CanonicalMigrationModel(BaseModel):
     retention_hint: RetentionHint = Field(default_factory=RetentionHint)
     unsupported_features: list[UnsupportedFeature] = Field(default_factory=list)
     risk_annotations: list[RiskAnnotation] = Field(default_factory=list)
+    # The wire-format Druid was reading. dpm uses this to pick the
+    # right Pinot RecordReader (JSON / Parquet / Avro / ORC / CSV /
+    # Protobuf). Default ``json`` matches the Druid + Pinot common case
+    # and preserves backward compatibility with specs that pre-date this
+    # field. Unknown formats fall back to ``json`` with a warning.
+    input_format: str = "json"
     raw_io_config: dict = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
