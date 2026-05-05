@@ -5,6 +5,7 @@ import typer
 from migrator.cli.commands import (
     backfill_batch,
     cutover,
+    cutover_many,
     deploy,
     doctor,
     extract_offsets,
@@ -36,6 +37,8 @@ app.command("deploy")(deploy.command)
 app.command("parity-check")(parity_check.command)
 # End-to-end orchestration
 app.command("cutover")(cutover.command)
+# Multi-datasource batch cutover
+app.command("cutover-many")(cutover_many.command)
 # Lookups: Druid cluster lookup config → Pinot dim tables
 app.command("translate-lookups")(translate_lookups.command)
 # Pre-flight: connectivity / version / config sanity checks
