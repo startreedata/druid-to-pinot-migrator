@@ -37,6 +37,8 @@ def build_druid_spec(
     query_granularity: str = "NONE",
     intervals: list[str] | None = None,
     input_type: str = "inline",
+    input_format: str = "json",
+    input_format_extra: dict | None = None,
 ) -> dict:
     """
     Return a minimal Druid index_parallel spec dict that can be serialised
@@ -44,7 +46,29 @@ def build_druid_spec(
 
     timestamp_format defaults to "millis" so both Druid and Pinot handle
     epoch-millisecond integer timestamps without conversion issues.
+
+    ``input_format`` controls the ``ioConfig.inputFormat.type`` Druid
+    will read with — ``json`` (default), ``parquet``, ``avro_ocf``,
+    ``orc``, ``csv``, ``tsv``, or ``protobuf``. The migration test
+    matrix uses this to cover one Pinot table per input format.
+
+    ``input_format_extra`` merges extra keys into the inputFormat dict
+    (e.g. ``columns`` for CSV, ``protoBytesDecoder`` for protobuf). The
+    base ``type`` always wins.
     """
+    extra = dict(input_format_extra or {})
+    extra["type"] = input_format
+    # File extension defaults to match the format so an inline filter
+    # matches its sibling fixture file.
+    filter_for_format = {
+        "json":     "*.json",
+        "parquet":  "*.parquet",
+        "avro_ocf": "*.avro",
+        "orc":      "*.orc",
+        "csv":      "*.csv",
+        "tsv":      "*.tsv",
+        "protobuf": "*.pb",
+    }
     return {
         "type": "index_parallel",
         "spec": {
@@ -71,9 +95,9 @@ def build_druid_spec(
                 "inputSource": {
                     "type": input_type,
                     "baseDir": "/data",
-                    "filter": "*.json",
+                    "filter": filter_for_format.get(input_format, "*.json"),
                 },
-                "inputFormat": {"type": "json"},
+                "inputFormat": extra,
             },
         },
     }

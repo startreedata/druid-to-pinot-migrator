@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from migrator.core.enums import SourceKind
 from migrator.core.models import CanonicalMigrationModel
 
@@ -27,6 +29,40 @@ or via a sed / jq post-processing step; the tool defaults to maximum
 compatibility.
 """
 KAFKA_JSON_DECODER = "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder"
+
+# Avro Kafka decoders. Two flavours, matching how Druid's
+# ``avro_stream`` inputFormat is typically wired:
+#
+#   - ``KafkaConfluentSchemaRegistryAvroMessageDecoder`` for the common
+#     case where producer + consumer share a Confluent-style schema
+#     registry. Druid configures this via
+#     ``avroBytesDecoder.type=schema_registry``.
+#   - ``SimpleAvroMessageDecoder`` when the writer schema is supplied
+#     inline (Druid's ``avroBytesDecoder.type=schema_inline``). Pinot
+#     wants the schema as ``stream.kafka.decoder.prop.schema``.
+KAFKA_AVRO_REGISTRY_DECODER = (
+    "org.apache.pinot.plugin.inputformat.avro.confluent."
+    "KafkaConfluentSchemaRegistryAvroMessageDecoder"
+)
+KAFKA_AVRO_SIMPLE_DECODER = (
+    "org.apache.pinot.plugin.inputformat.avro.SimpleAvroMessageDecoder"
+)
+
+# Protobuf Kafka decoders. Two flavours mirroring Avro:
+#   - ``KafkaConfluentSchemaRegistryProtoBufMessageDecoder`` for the
+#     common Confluent-registry case. Druid wires it via
+#     ``protoBytesDecoder.type=schema_registry``.
+#   - ``ProtoBufMessageDecoder`` for the descriptor-file path. Druid's
+#     ``protoBytesDecoder.type=file`` carries the ``.desc`` file path
+#     and ``protoMessageType``; Pinot wants ``descriptorFile`` (HTTP
+#     URL or local path) and ``protoClassName``.
+KAFKA_PROTOBUF_REGISTRY_DECODER = (
+    "org.apache.pinot.plugin.inputformat.protobuf.confluent."
+    "KafkaConfluentSchemaRegistryProtoBufMessageDecoder"
+)
+KAFKA_PROTOBUF_FILE_DECODER = (
+    "org.apache.pinot.plugin.inputformat.protobuf.ProtoBufMessageDecoder"
+)
 DEFAULT_OFFSET_RESET = "largest"
 """Used when no migration watermark is supplied. Matches the historical
 Pinot default for new REALTIME tables."""
@@ -158,6 +194,7 @@ def build_kafka_stream_configs(
     broker_list: str,
     offset_criteria: str = DEFAULT_OFFSET_RESET,
     decoder_class: str = KAFKA_JSON_DECODER,
+    decoder_props: dict[str, str] | None = None,
     flush_threshold_rows: str = "1000000",
     flush_threshold_time: str = "1h",
 ) -> dict[str, str]:
@@ -174,10 +211,15 @@ def build_kafka_stream_configs(
     - A relative period like ``"7d"`` or ``"4h30m"`` — Pinot's PERIOD
       offset criterion (relative to broker request time).
 
+    ``decoder_props`` (when given) are written as
+    ``stream.kafka.decoder.prop.<key>`` entries. Used by the Avro
+    schema-registry decoder for ``schema.registry.rest.url`` and by
+    the simple-Avro decoder for the inline schema string.
+
     Pulled out as a free function so the hybrid planner and the existing
     PinotTableGenerator can share one definition.
     """
-    return {
+    cfg: dict[str, str] = {
         "streamType": "kafka",
         "stream.kafka.topic.name": topic,
         "stream.kafka.broker.list": broker_list,
@@ -188,6 +230,149 @@ def build_kafka_stream_configs(
         "realtime.segment.flush.threshold.rows": flush_threshold_rows,
         "realtime.segment.flush.threshold.time": flush_threshold_time,
     }
+    for k, v in (decoder_props or {}).items():
+        cfg[f"stream.kafka.decoder.prop.{k}"] = v
+    return cfg
+
+
+def _schema_registry_props(decoder_block: dict) -> dict[str, str]:
+    """Translate a Druid ``*BytesDecoder`` schema-registry block into
+    Pinot ``stream.kafka.decoder.prop.*`` keys.
+
+    Both Avro and Protobuf Confluent decoders share this surface in
+    Pinot — the decoder *class* differs, but the prop keys for URL +
+    auth + headers are identical. Pulled into a helper so a fix in
+    one path automatically propagates.
+
+    Properties handled:
+
+      - ``url`` / ``urls`` → ``schema.registry.rest.url`` (Pinot
+        accepts a comma-joined list for HA registries).
+      - ``config.basic.auth.credentials.source`` /
+        ``config.basicAuthCredentialsSource`` (Druid casing varies)
+        → ``basic.auth.credentials.source``.
+      - ``config.basic.auth.user.info`` / ``config.basicAuthUserInfo``
+        → ``basic.auth.user.info``. Loaded into the registry HTTP
+        client; the underlying Kafka client itself is unaffected.
+      - ``capacity`` → ``schema.registry.cache.capacity`` when set
+        (Druid's local cache size; Pinot has the same knob).
+
+    Anything not listed here is dropped — Pinot's decoder will use
+    the SDK defaults, which is what the operator wanted anyway by
+    not setting the corresponding Druid field.
+    """
+    props: dict[str, str] = {}
+
+    # URL (single) wins; ``urls`` array gets comma-joined for the HA
+    # case — Pinot's Confluent client honours the comma list.
+    url = decoder_block.get("url") or ""
+    urls = decoder_block.get("urls") or []
+    if url:
+        props["schema.registry.rest.url"] = url
+    elif urls:
+        props["schema.registry.rest.url"] = ",".join(urls)
+
+    # Auth lives under a nested ``config`` block; both camel-case
+    # (``basicAuthUserInfo``) and dotted-key (``basic.auth.user.info``)
+    # spellings appear in real specs depending on Druid version.
+    config = decoder_block.get("config") or {}
+    auth_source = (
+        config.get("basic.auth.credentials.source")
+        or config.get("basicAuthCredentialsSource")
+    )
+    if auth_source:
+        props["basic.auth.credentials.source"] = str(auth_source)
+    user_info = (
+        config.get("basic.auth.user.info")
+        or config.get("basicAuthUserInfo")
+    )
+    if user_info:
+        props["basic.auth.user.info"] = str(user_info)
+
+    capacity = decoder_block.get("capacity")
+    if capacity:
+        props["schema.registry.cache.capacity"] = str(capacity)
+
+    return props
+
+
+def avro_decoder_config_from_io(io: dict) -> tuple[str, dict[str, str]]:
+    """Pick the right Pinot Avro decoder for a Druid ``ioConfig`` block.
+
+    Druid wires Avro on Kafka via ``inputFormat.type == "avro_stream"``
+    plus an ``avroBytesDecoder`` sub-object that says how to find the
+    writer schema:
+
+      - ``schema_registry``: pulls URL + (optional) basic-auth
+        credentials + capacity out via ``_schema_registry_props`` and
+        points Pinot at the Confluent decoder.
+      - ``schema_inline``: Druid embeds the schema JSON inline; we map
+        to Pinot's ``SimpleAvroMessageDecoder`` and pass the schema
+        string through as the decoder prop ``schema``. The operator
+        is responsible for verifying the schema renders correctly
+        (Druid sometimes accepts variants Pinot's decoder rejects).
+      - Anything else / missing: fall back to schema-registry decoder
+        with no URL — the normalizer surfaces a warning so the operator
+        knows to fill it in post-generation.
+
+    Returned tuple is (decoder_class, decoder_props) in the shape
+    ``build_kafka_stream_configs`` expects.
+    """
+    avro_decoder = (io.get("inputFormat") or {}).get("avroBytesDecoder", {})
+    decoder_type = (avro_decoder.get("type") or "").lower()
+    if decoder_type == "schema_registry":
+        return KAFKA_AVRO_REGISTRY_DECODER, _schema_registry_props(avro_decoder)
+    if decoder_type == "schema_inline":
+        schema = avro_decoder.get("schema", "")
+        # Pinot expects the schema as a JSON string. If Druid stored it
+        # as a dict, serialise; otherwise pass through.
+        if isinstance(schema, dict):
+            schema = json.dumps(schema)
+        return KAFKA_AVRO_SIMPLE_DECODER, {"schema": schema} if schema else {}
+    # Default: registry decoder with no URL — the simpler ``avro``
+    # alias used by some operator-written specs lands here too.
+    return KAFKA_AVRO_REGISTRY_DECODER, {}
+
+
+def protobuf_decoder_config_from_io(io: dict) -> tuple[str, dict[str, str]]:
+    """Pick the right Pinot Protobuf decoder for a Druid ``ioConfig``.
+
+    Druid's ``protoBytesDecoder`` mirrors ``avroBytesDecoder`` in
+    shape but the field names + the Pinot decoder class differ:
+
+      - ``schema_registry``: uses the same URL/auth/capacity props as
+        Avro (registry-side wire format is identical).
+        ``schemaName`` (the Protobuf message type) is required by
+        Pinot's Confluent decoder; pull it from Druid's
+        ``protoMessageType``.
+      - ``file``: descriptor-file mode. Druid stores the ``.desc``
+        path on ``descriptor`` and the message type on
+        ``protoMessageType``; Pinot wants ``descriptorFile`` (path
+        or URL) and ``protoClassName``.
+
+    Anything else falls back to the registry decoder, with the
+    normalizer surfacing the missing-config warning.
+    """
+    proto_decoder = (io.get("inputFormat") or {}).get("protoBytesDecoder", {})
+    decoder_type = (proto_decoder.get("type") or "").lower()
+    if decoder_type == "schema_registry":
+        props = _schema_registry_props(proto_decoder)
+        # The protobuf message type is mandatory for the Confluent
+        # decoder; Druid stores it on ``protoMessageType``.
+        message_type = proto_decoder.get("protoMessageType") or ""
+        if message_type:
+            props["schemaName"] = message_type
+        return KAFKA_PROTOBUF_REGISTRY_DECODER, props
+    if decoder_type == "file":
+        descriptor = proto_decoder.get("descriptor", "")
+        message_type = proto_decoder.get("protoMessageType", "")
+        props: dict[str, str] = {}
+        if descriptor:
+            props["descriptorFile"] = descriptor
+        if message_type:
+            props["protoClassName"] = message_type
+        return KAFKA_PROTOBUF_FILE_DECODER, props
+    return KAFKA_PROTOBUF_REGISTRY_DECODER, {}
 
 
 class PinotTableGenerator:
@@ -285,10 +470,22 @@ class PinotTableGenerator:
             consumer_props = io.get("consumerProperties", {})
             broker_list = consumer_props.get("bootstrap.servers", "localhost:9092")
             topic = io.get("topic", canonical.datasource_name)
+            # Pick the decoder from the canonical input_format. Default
+            # is JSON (the v0.10.0 behaviour); ``avro`` swaps in the
+            # Confluent or simple Avro decoder, depending on the Druid
+            # spec's avroBytesDecoder.type.
+            decoder_class = KAFKA_JSON_DECODER
+            decoder_props: dict[str, str] = {}
+            if canonical.input_format == "avro":
+                decoder_class, decoder_props = avro_decoder_config_from_io(io)
+            elif canonical.input_format == "protobuf":
+                decoder_class, decoder_props = protobuf_decoder_config_from_io(io)
             stream_configs = build_kafka_stream_configs(
                 topic=topic,
                 broker_list=broker_list,
                 offset_criteria=offset_criteria,
+                decoder_class=decoder_class,
+                decoder_props=decoder_props,
             )
 
         table: dict = {
