@@ -104,6 +104,7 @@ class SpecDiff:
     datasource_name_changed: FieldChange | None = None
     source_kind_changed: FieldChange | None = None
     classification_changed: FieldChange | None = None
+    input_format_changed: FieldChange | None = None
     time_field_changes: list[FieldChange] = field(default_factory=list)
     granularity_changes: list[FieldChange] = field(default_factory=list)
     dimensions: DimensionsDiff = field(default_factory=DimensionsDiff)
@@ -122,6 +123,7 @@ class SpecDiff:
             self.datasource_name_changed is None
             and self.source_kind_changed is None
             and self.classification_changed is None
+            and self.input_format_changed is None
             and not self.time_field_changes
             and not self.granularity_changes
             and self.dimensions.is_empty
@@ -142,6 +144,10 @@ class SpecDiff:
             "classification_changed": (
                 self.classification_changed.to_dict()
                 if self.classification_changed else None
+            ),
+            "input_format_changed": (
+                self.input_format_changed.to_dict()
+                if self.input_format_changed else None
             ),
             "time_field_changes": [c.to_dict() for c in self.time_field_changes],
             "granularity_changes": [c.to_dict() for c in self.granularity_changes],
@@ -194,6 +200,11 @@ def diff_canonical(
         diff.classification_changed = FieldChange(
             name="classification",
             old=old.classification, new=new.classification,
+        )
+    if old.input_format != new.input_format:
+        diff.input_format_changed = FieldChange(
+            name="input_format",
+            old=old.input_format, new=new.input_format,
         )
 
     diff.time_field_changes = _diff_time_field(old.time_field, new.time_field)
@@ -392,6 +403,17 @@ def _derive_pinot_implications(diff: SpecDiff) -> list[str]:
             f"time_field changed ({len(diff.time_field_changes)} fields); "
             "Pinot schema dateTimeFieldSpec must be updated and existing "
             "segments may need a time-column re-encode."
+        )
+    if diff.input_format_changed:
+        old_fmt = diff.input_format_changed.old
+        new_fmt = diff.input_format_changed.new
+        out.append(
+            f"input format changed ({old_fmt} → {new_fmt}); the Pinot "
+            "batch-job's RecordReader (and the REALTIME table's Kafka "
+            "decoder, for stream specs) must be regenerated. "
+            "``dpm generate`` will pick the right Pinot plugin "
+            "automatically — but the deployed table config has to be "
+            "redeployed to apply the change."
         )
     for change in diff.granularity_changes:
         if change.name == "granularity.rollup":

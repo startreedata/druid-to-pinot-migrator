@@ -90,6 +90,14 @@ def _print_pretty(diff) -> None:
             f"{diff.classification_changed.old} → "
             f"{diff.classification_changed.new}"
         )
+    if diff.input_format_changed:
+        # Highlighted because changing the wire format means the
+        # generated Pinot artifact is wrong without a redeploy.
+        _console.print(
+            f"[red]input_format:[/red] "
+            f"{diff.input_format_changed.old} → "
+            f"{diff.input_format_changed.new}"
+        )
     if diff.time_field_changes:
         _console.print("[yellow]time_field:[/yellow]")
         for c in diff.time_field_changes:
