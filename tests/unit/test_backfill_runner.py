@@ -832,3 +832,176 @@ class TestRunBackfillPageResume:
         for i in (0, 1, 3):
             (tmp_path / f"page-{i:06d}.json.ingested").write_text("{}")
         assert _scan_completed_pages(tmp_path) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Progress streaming
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.realtime.backfill_runner import BackfillProgress
+
+
+class TestProgressCallback:
+    def test_callback_fires_once_per_page(self, tmp_path):
+        rows = [{"v": i} for i in range(7)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        events: list[BackfillProgress] = []
+
+        run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=3,
+            progress_callback=events.append,
+        )
+        # 7 / 3 = 3 pages → 3 progress events.
+        assert len(events) == 3
+
+    def test_callback_payload_fields_populated(self, tmp_path):
+        rows = [{"v": i} for i in range(5)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        events: list[BackfillProgress] = []
+
+        run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=2,
+            progress_callback=events.append,
+        )
+        # 5 rows / 2 = 3 pages (2, 2, 1).
+        assert events[0].page_index == 0
+        assert events[0].rows_in_page == 2
+        assert events[0].rows_total_so_far == 2
+        assert events[0].pages_done == 1
+
+        assert events[1].page_index == 1
+        assert events[1].rows_in_page == 2
+        assert events[1].rows_total_so_far == 4
+
+        # Last page — short by design.
+        assert events[2].page_index == 2
+        assert events[2].rows_in_page == 1
+        assert events[2].rows_total_so_far == 5
+
+        # Sanity on derived rate fields: must be positive (or 0 for an
+        # absurdly-fast empty page) and elapsed must be non-decreasing.
+        assert all(e.rows_per_sec >= 0 for e in events)
+        assert all(e.elapsed_s >= 0 for e in events)
+        assert events[-1].elapsed_s >= events[0].elapsed_s
+
+    def test_callback_fires_after_marker_is_written(self, tmp_path):
+        # Operator monitoring: when a progress event arrives, the
+        # corresponding marker is already on disk. This guarantees the
+        # event accurately represents work that survived a crash.
+        rows = [{"v": i} for i in range(3)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        marker_existed_at_callback: list[bool] = []
+
+        def check_marker(p: BackfillProgress) -> None:
+            marker_path = tmp_path / f"page-{p.page_index:06d}.json.ingested"
+            marker_existed_at_callback.append(marker_path.exists())
+
+        run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=10,
+            progress_callback=check_marker,
+        )
+        assert marker_existed_at_callback == [True]
+
+    def test_callback_exception_does_not_abort_backfill(self, tmp_path):
+        # Misbehaving callbacks are an operator-side bug — they must
+        # not abort the migration. Backfill continues; data + markers
+        # land normally.
+        def bad_callback(_p: BackfillProgress) -> None:
+            raise RuntimeError("operator's progress UI exploded")
+
+        rows = [{"v": i} for i in range(5)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        result = run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=2,
+            progress_callback=bad_callback,
+        )
+        # All pages still ingested.
+        assert result.pages_dumped == 3
+        assert result.rows_dumped == 5
+        # Markers all written.
+        assert (tmp_path / "page-000002.json.ingested").exists()
+
+    def test_no_callback_means_no_events_no_overhead(self, tmp_path):
+        # Backward compat: ``progress_callback`` is optional; the
+        # default of None must be a true no-op (not even a "default
+        # callback" doing anything).
+        rows = [{"v": i} for i in range(3)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        result = run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=10,
+        )
+        assert result.pages_dumped == 1
+
+    def test_resumed_run_progress_uses_absolute_page_index(self, tmp_path):
+        # On resume after pages 0-1 completed previously, the FIRST
+        # progress event of the new run should report page_index=2,
+        # not 0. This matches operator mental-model ("we're now on
+        # page 2 of the original 5") rather than "page 0 of this run".
+        # Stage marker files directly to fake a previous run's state.
+        for i in (0, 1):
+            (tmp_path / f"page-{i:06d}.json.ingested").write_text("{}")
+        # Stage matching fingerprint so resume kicks in.
+        from migrator.realtime.backfill_runner import (
+            _RESUME_FINGERPRINT_FILENAME,
+            _backfill_fingerprint,
+        )
+        fp = _backfill_fingerprint(
+            "ds", "2024-01-01T00:00:00Z", "2024-02-01T00:00:00Z", 2, "timestamp",
+        )
+        (tmp_path / _RESUME_FINGERPRINT_FILENAME).write_text(json.dumps(fp))
+
+        # Pager that yields rows for the un-skipped pages.
+        from migrator.realtime.backfill_runner import BackfillProgress
+
+        class _SkipAwarePager:
+            def page_rows(self, ds, *, start_iso, end_iso, page_rows, start_offset=0):
+                # 5 rows total, 2 per page, start at offset (skipped 4 = 2 pages).
+                # Yield the un-ingested remainder.
+                yield [{"v": i} for i in range(start_offset, start_offset + 2)]
+                yield [{"v": i} for i in range(start_offset + 2, start_offset + 3)]
+
+        events: list[BackfillProgress] = []
+        result = run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=_SkipAwarePager(), sink=CountingSink(),
+            page_rows=2,
+            progress_callback=events.append,
+        )
+        assert result.pages_resumed == 2
+        # First event of the new run is page_index=2, not 0.
+        assert events[0].page_index == 2
+        assert events[1].page_index == 3
