@@ -1,0 +1,36 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "warehouse_orders",
+      "timestampSpec": {
+        "column": "order_time",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["country", "channel", "category"]
+      },
+      "metricsSpec": [
+        {"type": "count",     "name": "order_count"},
+        {"type": "doubleSum", "name": "revenue_sum", "fieldName": "revenue"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "DAY",
+        "queryGranularity": "HOUR",
+        "rollup": true,
+        "intervals": ["2024-01-01/2024-04-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "google",
+        "uris": ["gs://prod-warehouse/orders/year=2024/"]
+      },
+      "inputFormat": {
+        "type": "orc"
+      }
+    }
+  }
+}
