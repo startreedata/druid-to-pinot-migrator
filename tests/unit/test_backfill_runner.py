@@ -30,7 +30,7 @@ class StubPager:
         self._rows = rows
         self.last_call: dict = {}
 
-    def page_rows(self, datasource, *, start_iso, end_iso, page_rows) -> Iterator[list[dict]]:
+    def page_rows(self, datasource, *, start_iso, end_iso, page_rows, start_offset=0) -> Iterator[list[dict]]:
         self.last_call = dict(
             datasource=datasource,
             start_iso=start_iso,
@@ -654,3 +654,181 @@ class TestPinotIngestFromFileSink:
         # `requests.post`. Verify __init__ accepts the no-session path.
         sink = PinotIngestFromFileSink("http://pinot:9000")
         assert sink._session is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page-level resume
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.realtime.backfill_runner import (
+    _RESUME_FINGERPRINT_FILENAME,
+    _scan_completed_pages,
+)
+
+
+class _FailingIngestSink:
+    """Sink that records every call and raises on the Nth ingest_file
+    invocation so we can simulate mid-backfill failures."""
+
+    def __init__(self, fail_on: int) -> None:
+        self.fail_on = fail_on
+        self.received: list = []
+
+    def ingest_file(self, ndjson_path, table_name) -> None:
+        self.received.append((Path(ndjson_path), table_name))
+        if len(self.received) == self.fail_on:
+            raise RuntimeError(f"simulated failure on ingest #{self.fail_on}")
+
+
+class _RecordingPager:
+    """Pager that yields preset pages but also records the start_offset
+    it received — so a resume test can prove the offset bumped."""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.last_start_offset: int | None = None
+
+    def page_rows(self, datasource, *, start_iso, end_iso, page_rows, start_offset=0):
+        self.last_start_offset = start_offset
+        # Skip the first ``start_offset // page_rows`` pages — the
+        # real DruidHttpSqlPager would do this via OFFSET in SQL.
+        skip = start_offset // page_rows
+        for p in self._pages[skip:]:
+            yield p
+
+
+class TestRunBackfillPageResume:
+    def test_first_run_writes_markers_for_each_ingested_page(self, tmp_path):
+        rows = [{"v": i} for i in range(7)]
+        pager = StubPager(rows)
+        sink = CountingSink()
+        run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=3,
+        )
+        # 7 rows / 3 = 3 pages. Each page produces a sibling
+        # ``.ingested`` marker after the sink call returns.
+        for i in range(3):
+            assert (tmp_path / f"page-{i:06d}.json.ingested").exists(), (
+                f"missing marker for page {i}"
+            )
+        # Fingerprint is also written so a resume can validate it.
+        assert (tmp_path / _RESUME_FINGERPRINT_FILENAME).exists()
+
+    def test_failure_mid_backfill_leaves_partial_markers(self, tmp_path):
+        # Sink errors on the 2nd ingest. Page 0 should have a marker,
+        # page 1 should NOT (the marker is written *after* the sink
+        # returns successfully).
+        rows = [{"v": i} for i in range(7)]
+        pager = StubPager(rows)
+        sink = _FailingIngestSink(fail_on=2)
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            run_backfill(
+                datasource="ds", pinot_table="ds",
+                start_iso="2024-01-01T00:00:00Z",
+                end_iso="2024-02-01T00:00:00Z",
+                staging_dir=tmp_path,
+                pager=pager, sink=sink,
+                page_rows=3,
+            )
+        assert (tmp_path / "page-000000.json.ingested").exists()
+        assert not (tmp_path / "page-000001.json.ingested").exists()
+
+    def test_resume_skips_completed_pages(self, tmp_path):
+        # First run: ingest 1 page, then fail.
+        rows = [{"v": i} for i in range(7)]
+        run1_pager = StubPager(rows)
+        run1_sink = _FailingIngestSink(fail_on=2)
+        with pytest.raises(RuntimeError):
+            run_backfill(
+                datasource="ds", pinot_table="ds",
+                start_iso="2024-01-01T00:00:00Z",
+                end_iso="2024-02-01T00:00:00Z",
+                staging_dir=tmp_path,
+                pager=run1_pager, sink=run1_sink,
+                page_rows=3,
+            )
+        # Second run: page 0's marker exists. Resume should pass
+        # start_offset=3 (=1 page * 3 rows) so the pager skips that
+        # page entirely. Pages 1 and 2 ingest cleanly this time.
+        run2_pager = _RecordingPager([
+            [{"v": i} for i in range(0, 3)],   # already done — should be skipped
+            [{"v": i} for i in range(3, 6)],
+            [{"v": i} for i in range(6, 7)],
+        ])
+        run2_sink = CountingSink()
+        result = run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=run2_pager, sink=run2_sink,
+            page_rows=3,
+        )
+        assert run2_pager.last_start_offset == 3
+        assert result.pages_resumed == 1
+        # Sink only saw the un-ingested pages (pages 1 + 2).
+        assert len(run2_sink.received) == 2
+        # All three markers now exist.
+        for i in range(3):
+            assert (tmp_path / f"page-{i:06d}.json.ingested").exists()
+
+    def test_resume_disabled_replays_from_zero(self, tmp_path):
+        # Stage a marker for page 0 manually.
+        (tmp_path / "page-000000.json.ingested").write_text("{}")
+        pager = StubPager([{"v": 1}, {"v": 2}, {"v": 3}])
+        sink = CountingSink()
+        result = run_backfill(
+            datasource="ds", pinot_table="ds",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=3,
+            resume=False,
+        )
+        # resume=False: ignore the existing marker; pages_resumed=0.
+        assert result.pages_resumed == 0
+
+    def test_fingerprint_mismatch_invalidates_resume(self, tmp_path):
+        # Stage a fingerprint that doesn't match the current run's
+        # identity (different datasource). Resume must NOT skip
+        # pages — using a stale fingerprint would apply the wrong
+        # source to the wrong target.
+        (tmp_path / _RESUME_FINGERPRINT_FILENAME).write_text(json.dumps({
+            "datasource": "OTHER_DS",
+            "start_iso": "2024-01-01T00:00:00Z",
+            "end_iso": "2024-02-01T00:00:00Z",
+            "page_rows": 3,
+            "time_column": "timestamp",
+        }))
+        # Stage a marker that would otherwise fool resume.
+        (tmp_path / "page-000000.json.ingested").write_text("{}")
+        pager = _RecordingPager([
+            [{"v": 1}], [{"v": 2}],
+        ])
+        sink = CountingSink()
+        run_backfill(
+            datasource="MY_DS", pinot_table="MY_DS",
+            start_iso="2024-01-01T00:00:00Z",
+            end_iso="2024-02-01T00:00:00Z",
+            staging_dir=tmp_path,
+            pager=pager, sink=sink,
+            page_rows=3,
+        )
+        # Pager started from offset 0 — fingerprint mismatch means
+        # the existing marker can't be trusted.
+        assert pager.last_start_offset == 0
+
+    def test_scan_completed_pages_stops_at_first_gap(self, tmp_path):
+        # Scenario: pages 0, 1, 3 done but 2 missing. The orchestrator
+        # only counts the contiguous run from 0 — re-doing 2 onward
+        # is safer than gambling on out-of-order resume.
+        for i in (0, 1, 3):
+            (tmp_path / f"page-{i:06d}.json.ingested").write_text("{}")
+        assert _scan_completed_pages(tmp_path) == 2

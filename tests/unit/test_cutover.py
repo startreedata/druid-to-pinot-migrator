@@ -72,7 +72,7 @@ class StubPager:
         self._rows = rows if rows is not None else [{"a": 1}, {"a": 2}]
         self.calls: list = []
 
-    def page_rows(self, datasource, *, start_iso, end_iso, page_rows):
+    def page_rows(self, datasource, *, start_iso, end_iso, page_rows, start_offset=0):
         self.calls.append((datasource, start_iso, end_iso))
         if self._rows:
             yield self._rows

@@ -36,8 +36,15 @@ class DruidSqlPager(Protocol):
         start_iso: str,
         end_iso: str,
         page_rows: int,
+        start_offset: int = 0,
     ) -> Iterator[list[dict]]:
-        """Yield successive lists of rows (each at most ``page_rows`` long)."""
+        """Yield successive lists of rows (each at most ``page_rows`` long).
+
+        ``start_offset`` is the row-OFFSET into the underlying SQL —
+        the orchestrator passes ``rows_already_ingested`` here on a
+        resume so the pager skips pages already covered by markers.
+        Defaults to 0 for fresh runs.
+        """
 
 
 class PinotIngestSink(Protocol):
@@ -82,6 +89,7 @@ class DruidHttpSqlPager:
         start_iso: str,
         end_iso: str,
         page_rows: int,
+        start_offset: int = 0,
     ) -> Iterator[list[dict]]:
         # Druid SQL TIMESTAMP literals require 'yyyy-MM-dd HH:mm:ss[.SSS]'
         # format — not ISO 8601 with 'T'/'Z'. Convert.
@@ -89,7 +97,7 @@ class DruidHttpSqlPager:
             return s.replace("T", " ").rstrip("Z").rstrip()
         start_druid = _druid_ts(start_iso)
         end_druid = _druid_ts(end_iso)
-        offset = 0
+        offset = start_offset
         while True:
             sql = (
                 f'SELECT * FROM "{datasource}" '
@@ -327,6 +335,68 @@ class BackfillResult:
     rows_dumped: int
     files_ingested: int
     staging_dir: Path
+    # Pages skipped because their ``.ingested`` marker already existed
+    # from a previous run. Sum of (pages_dumped + pages_resumed) is
+    # the total pages the operator's interval covers.
+    pages_resumed: int = 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page-level resume helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_RESUME_FINGERPRINT_FILENAME = "_backfill_fingerprint.json"
+
+
+def _backfill_fingerprint(
+    datasource: str, start_iso: str, end_iso: str,
+    page_rows: int, time_column: str,
+) -> dict:
+    """Top-level fingerprint of the backfill identity.
+
+    Persisted to staging_dir on the first page write; on resume we
+    refuse to honour markers from a stale fingerprint (different
+    datasource / interval / page size) — better to redo work than
+    silently apply someone else's NDJSON to the wrong table.
+    """
+    return {
+        "datasource": datasource,
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+        "page_rows": page_rows,
+        "time_column": time_column,
+    }
+
+
+def _scan_completed_pages(staging: Path) -> int:
+    """Return the highest contiguous page index N such that
+    ``page-NNNNNN.json.ingested`` exists for all 0..N. Pages with
+    a hole (e.g. 0,1,3 done but 2 missing) count only the initial
+    contiguous run — we re-do the rest because the gap suggests a
+    partial failure mid-page."""
+    n = 0
+    while (staging / f"page-{n:06d}.json.ingested").exists():
+        n += 1
+    return n
+
+
+def _write_marker(page_path: Path, page_index: int, rows: int) -> None:
+    """Atomically write the marker sidecar after a successful ingest.
+    Tmp + rename guarantees a crash mid-write doesn't leave a
+    half-formed marker that resume would mistakenly trust."""
+    marker = page_path.with_name(page_path.name + ".ingested")
+    tmp = marker.with_suffix(marker.suffix + ".tmp")
+    tmp.write_text(json.dumps({
+        "page_index": page_index,
+        "rows": rows,
+        "ingested_at": _utc_iso_now(),
+    }) + "\n")
+    tmp.replace(marker)
+
+
+def _utc_iso_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def run_backfill(
@@ -340,11 +410,31 @@ def run_backfill(
     sink: PinotIngestSink,
     page_rows: int = 50_000,
     time_column: str = "timestamp",
+    resume: bool = True,
 ) -> BackfillResult:
     """
     Page rows out of Druid for the watermark-bounded interval, write each
     page to its own NDJSON file under ``staging_dir``, then push every
     NDJSON file to the Pinot OFFLINE table.
+
+    Each page is processed end-to-end before moving to the next:
+
+      1. Page rows are written to ``page-NNNNNN.json``.
+      2. ``sink.ingest_file`` is called for that page.
+      3. A ``page-NNNNNN.json.ingested`` marker is written atomically.
+
+    If the run crashes between steps 2 and 3, the marker is missing
+    on the next run — we re-ingest that page (idempotent at the
+    Druid-source side; Pinot may receive a duplicate segment, which
+    operators can deduplicate by table-name suffix or via the
+    cutover-report log).
+
+    ``resume`` (default True) scans ``staging_dir`` for existing
+    markers on entry: if the fingerprint matches the current run's
+    identity (datasource / interval / page size / time column) and
+    pages 0..N are all marked ingested, the pager starts from
+    OFFSET = (N+1) * page_rows. Pass ``resume=False`` (or delete
+    ``staging_dir``) to force a fresh ingest.
 
     The ``pager`` and ``sink`` arguments are dependency-injection seams —
     tests pass in stubs; real callers use ``DruidHttpSqlPager`` and
@@ -358,30 +448,52 @@ def run_backfill(
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
 
+    fingerprint = _backfill_fingerprint(
+        datasource, start_iso, end_iso, page_rows, time_column,
+    )
+    fp_path = staging / _RESUME_FINGERPRINT_FILENAME
+    pages_resumed = 0
+    if resume and fp_path.exists():
+        try:
+            stored = json.loads(fp_path.read_text())
+        except json.JSONDecodeError:
+            stored = None
+        if stored == fingerprint:
+            pages_resumed = _scan_completed_pages(staging)
+        # Mismatched fingerprint: silently start over. The fingerprint
+        # file itself gets overwritten below so the next run sees a
+        # clean state.
+    fp_path.write_text(json.dumps(fingerprint, sort_keys=True) + "\n")
+
     pages_dumped = 0
     rows_dumped = 0
-    paths: list[Path] = []
+    files_ingested = 0
+    page_index = pages_resumed
+    start_offset = pages_resumed * page_rows
 
     for rows in pager.page_rows(
-        datasource, start_iso=start_iso, end_iso=end_iso, page_rows=page_rows
+        datasource, start_iso=start_iso, end_iso=end_iso,
+        page_rows=page_rows, start_offset=start_offset,
     ):
-        page_path = staging / f"page-{pages_dumped:06d}.json"
+        page_path = staging / f"page-{page_index:06d}.json"
         with page_path.open("w") as fh:
             for r in rows:
                 normalized = _normalize_time_column(r, time_column)
                 fh.write(json.dumps(normalized) + "\n")
-        paths.append(page_path)
+        sink.ingest_file(page_path, pinot_table)
+        _write_marker(page_path, page_index, len(rows))
+
         pages_dumped += 1
         rows_dumped += len(rows)
-
-    for p in paths:
-        sink.ingest_file(p, pinot_table)
+        files_ingested += 1
+        page_index += 1
 
     return BackfillResult(
         pages_dumped=pages_dumped,
         rows_dumped=rows_dumped,
-        files_ingested=len(paths),
+        files_ingested=files_ingested,
         staging_dir=staging,
+        pages_resumed=pages_resumed,
     )
 
 
