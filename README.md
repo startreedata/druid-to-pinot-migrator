@@ -77,6 +77,23 @@ Legend:
 
 See [docs/reference/risks.md](docs/reference/risks.md) for the full risk taxonomy.
 
+### Input format support
+
+Druid's `ioConfig.inputFormat.type` is threaded through to the right Pinot RecordReader (batch) or Kafka decoder (stream) — the generated table config + batch-job spec are correct on first emission, no hand-edits required.
+
+| Druid `inputFormat.type` | Pinot batch RecordReader | Pinot Kafka decoder | Schema source |
+|---|---|---|---|
+| `json` (default) | `JSONRecordReader` | `JSONMessageDecoder` | — |
+| `parquet` | `ParquetRecordReader` | n/a (batch only) | embedded |
+| `avro_ocf` | `AvroRecordReader` | n/a (batch only) | embedded in OCF header |
+| `avro_stream` | n/a | `KafkaConfluentSchemaRegistryAvroMessageDecoder` *or* `SimpleAvroMessageDecoder` | Confluent schema registry / inline schema string |
+| `orc` | `ORCRecordReader` | n/a (batch only) | embedded |
+| `csv` / `tsv` | `CSVRecordReader` | n/a | column list from spec |
+| `protobuf` (batch) | `ProtoBufRecordReader` | n/a | descriptor file |
+| `protobuf` (stream) | n/a | `KafkaConfluentSchemaRegistryProtoBufMessageDecoder` *or* `ProtoBufMessageDecoder` | Confluent registry / `.desc` file |
+
+Avro + schema-registry handles HA `urls` arrays (comma-joined into Pinot's URL prop), basic auth (both Druid camelCase and dotted-key spellings), and the cache `capacity` knob. Protobuf streams require `protoMessageType` (mapped to Pinot's `schemaName`); registry-mode also takes the same auth surface as Avro. Loud warnings fire when load-bearing fields are missing — the failure mode at runtime is silent (Pinot drops un-decodable messages with no error), so the warnings are how operators notice in advance.
+
 ## Installation
 
 ```bash

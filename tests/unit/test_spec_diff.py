@@ -95,6 +95,35 @@ class TestTopLevelChanges:
         # Either is acceptable — what matters is that a change is
         # surfaced in the structural diff.
 
+    def test_input_format_change_flagged_with_implication(self):
+        # Operator switched their source from JSON to Parquet without
+        # touching anything else. The diff must surface this AND make
+        # clear that the Pinot batch-job needs to be regenerated and
+        # redeployed — otherwise the live cluster still reads with
+        # JSONRecordReader and silently fails on Parquet bytes.
+        d = diff_canonical(
+            _canon(input_format="json"),
+            _canon(input_format="parquet"),
+        )
+        assert d.input_format_changed is not None
+        assert d.input_format_changed.old == "json"
+        assert d.input_format_changed.new == "parquet"
+        # is_empty must be False — input_format alone is a real change.
+        assert not d.is_empty
+        # Implication mentions the RecordReader / decoder regen path.
+        impl_text = " ".join(d.pinot_implications).lower()
+        assert "input format" in impl_text or "input_format" in impl_text
+        assert "redeployed" in impl_text or "regenerated" in impl_text
+
+    def test_input_format_unchanged_does_not_flag(self):
+        # Belt-and-suspenders: when both sides have the same format,
+        # nothing fires (avoiding noise when only e.g. dimensions changed).
+        d = diff_canonical(
+            _canon(input_format="parquet"),
+            _canon(input_format="parquet"),
+        )
+        assert d.input_format_changed is None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dimensions diff
