@@ -45,6 +45,12 @@ class PinotSchemaGenerator:
             "metricFieldSpecs": metric_field_specs,
             "dateTimeFieldSpecs": date_time_field_specs,
         }
+        # Upsert tables need ``primaryKeyColumns`` declared at the
+        # schema level (Pinot 1.0+). Without this the upsertConfig on
+        # the table side has nothing to dedupe against and ingestion
+        # fails at table-creation time.
+        if canonical.upsert.enabled and canonical.upsert.primary_key:
+            schema["primaryKeyColumns"] = list(canonical.upsert.primary_key)
         return schema
 
     def generate_with_warnings(self, canonical: CanonicalMigrationModel) -> tuple[dict, list[str]]:
@@ -77,4 +83,6 @@ class PinotSchemaGenerator:
             "metricFieldSpecs": metric_field_specs,
             "dateTimeFieldSpecs": date_time_field_specs,
         }
+        if canonical.upsert.enabled and canonical.upsert.primary_key:
+            schema["primaryKeyColumns"] = list(canonical.upsert.primary_key)
         return schema, warnings

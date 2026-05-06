@@ -84,6 +84,45 @@ class TestGenerateCommand:
         assert result.exit_code == 0
         assert (tmp_path / "table-realtime.json").exists()
 
+    def test_generate_with_upsert_primary_key_flag(self, tmp_path: Path):
+        # End-to-end CLI test for the new ``--upsert-primary-key`` flag:
+        # the generated schema gets ``primaryKeyColumns`` and the
+        # realtime table gets ``upsertConfig`` + the strict-replica-
+        # group routing knob Pinot requires.
+        spec = str(FIXTURES / "raw_stream" / "spec.json")
+        result = runner.invoke(app, [
+            "generate", spec, "--out", str(tmp_path),
+            "--upsert-primary-key", "user_id",
+        ])
+        assert result.exit_code == 0, result.output
+        schema = json.loads((tmp_path / "schema.json").read_text())
+        assert schema["primaryKeyColumns"] == ["user_id"]
+        table = json.loads((tmp_path / "table-realtime.json").read_text())
+        assert table["upsertConfig"]["mode"] == "FULL"
+        assert table["routing"]["instanceSelectorType"] == "strictReplicaGroup"
+
+    def test_generate_upsert_compound_key_via_repeated_flag(self, tmp_path: Path):
+        # ``--upsert-primary-key`` repeated → compound key.
+        spec = str(FIXTURES / "raw_stream" / "spec.json")
+        result = runner.invoke(app, [
+            "generate", spec, "--out", str(tmp_path),
+            "--upsert-primary-key", "user_id",
+            "--upsert-primary-key", "event_type",
+        ])
+        assert result.exit_code == 0, result.output
+        schema = json.loads((tmp_path / "schema.json").read_text())
+        # Order preserved — Pinot's hash uses tuple order.
+        assert schema["primaryKeyColumns"] == ["user_id", "event_type"]
+
+    def test_generate_upsert_on_batch_source_rejected(self, tmp_path: Path):
+        spec = str(FIXTURES / "raw_batch" / "spec.json")
+        result = runner.invoke(app, [
+            "generate", spec, "--out", str(tmp_path),
+            "--upsert-primary-key", "user",
+        ])
+        assert result.exit_code == 1
+        assert "streaming source" in result.output
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # validate

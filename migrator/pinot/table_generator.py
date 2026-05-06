@@ -522,6 +522,35 @@ class PinotTableGenerator:
         if transforms:
             table["ingestionConfig"] = {"transformConfigs": transforms}
 
+        # Upsert: emit ``upsertConfig`` + the strict-replica-group
+        # routing knob Pinot requires for upsert tables. The schema
+        # generator already wrote ``primaryKeyColumns`` at the schema
+        # level. Validation (PK exists, source_kind=stream) happens at
+        # the canonical-build / CLI boundary; by this point the
+        # canonical is trusted.
+        if canonical.upsert.enabled and canonical.upsert.primary_key:
+            upsert_block: dict = {
+                "mode": canonical.upsert.mode,
+            }
+            # Default the comparison column to the time field — the
+            # most common operator intent ("latest event wins for
+            # this PK").
+            comparison = (
+                canonical.upsert.comparison_column
+                or (canonical.time_field.column_name if canonical.time_field else None)
+            )
+            if comparison:
+                upsert_block["comparisonColumns"] = [comparison]
+            if canonical.upsert.mode.upper() == "PARTIAL" and canonical.upsert.partial_columns:
+                upsert_block["partialUpsertStrategies"] = dict(
+                    canonical.upsert.partial_columns
+                )
+            table["upsertConfig"] = upsert_block
+            # Mandatory for upsert: routing must be strict-replica-group
+            # so all replicas of a primary key route to the same server,
+            # otherwise dedup is broken.
+            table["routing"] = {"instanceSelectorType": "strictReplicaGroup"}
+
         return table
 
     def generate(self, canonical: CanonicalMigrationModel) -> dict:
