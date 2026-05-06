@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol
+from typing import Callable, Iterable, Iterator, Protocol
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,6 +342,30 @@ class BackfillResult:
     pages_resumed: int = 0
 
 
+@dataclass
+class BackfillProgress:
+    """One progress event, emitted to the progress callback after each
+    page is fully processed (write → ingest → marker).
+
+    Operators care about three things during a long backfill: am I
+    making progress, how fast, and how much longer. ``rows_total_so_far``
+    + ``elapsed_s`` answers the first two; ``rows_per_sec`` is derived
+    so dashboards don't have to compute it.
+
+    ``page_index`` is the absolute index across the whole interval
+    (NOT the index within this run) — so on a resume of a 250-page
+    backfill that previously completed 200, the first event of the
+    new run reports page_index=200, not 0.
+    """
+    page_index: int
+    rows_in_page: int
+    rows_total_so_far: int
+    pages_done: int
+    pages_resumed: int
+    elapsed_s: float
+    rows_per_sec: float
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Page-level resume helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,6 +436,7 @@ def run_backfill(
     page_rows: int = 50_000,
     time_column: str = "timestamp",
     resume: bool = True,
+    progress_callback: "Callable[[BackfillProgress], None] | None" = None,
 ) -> BackfillResult:
     """
     Page rows out of Druid for the watermark-bounded interval, write each
@@ -470,6 +496,12 @@ def run_backfill(
     files_ingested = 0
     page_index = pages_resumed
     start_offset = pages_resumed * page_rows
+    # Wall-clock anchor for ``elapsed_s`` / ``rows_per_sec`` reporting.
+    # Anchored at the START of this run, not the start of the original
+    # backfill — operators monitoring a resumed run want to see the
+    # current run's throughput, not a confusingly-low average that
+    # includes the prior crashed run's wall clock.
+    started_at = time.monotonic()
 
     for rows in pager.page_rows(
         datasource, start_iso=start_iso, end_iso=end_iso,
@@ -487,6 +519,28 @@ def run_backfill(
         rows_dumped += len(rows)
         files_ingested += 1
         page_index += 1
+
+        if progress_callback is not None:
+            elapsed = time.monotonic() - started_at
+            # Floor at ~1ms to avoid /0 on the very first event of an
+            # absurdly fast run (e.g. tiny test fixtures).
+            rate = rows_dumped / max(elapsed, 0.001)
+            try:
+                progress_callback(BackfillProgress(
+                    page_index=page_index - 1,
+                    rows_in_page=len(rows),
+                    rows_total_so_far=rows_dumped,
+                    pages_done=pages_dumped,
+                    pages_resumed=pages_resumed,
+                    elapsed_s=elapsed,
+                    rows_per_sec=rate,
+                ))
+            except Exception:  # noqa: BLE001
+                # A misbehaving callback must never abort the backfill —
+                # the operator's progress display is a nicety, not
+                # load-bearing on data correctness. Silent swallow is
+                # the right call here.
+                pass
 
     return BackfillResult(
         pages_dumped=pages_dumped,

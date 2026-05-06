@@ -185,6 +185,19 @@ def command(
             err=True,
         )
         raise typer.Exit(code=2)
+    # Per-page progress: ``[i] N rows  total=M  R rows/s  Ts``
+    # Stays single-line (no carriage return rewriting) so it composes
+    # with file-based logging too — operators usually pipe ``dpm
+    # backfill-batch`` output through ``tee`` to a log file.
+    def _print_progress(p) -> None:
+        typer.echo(
+            f"[page {p.page_index:>4d}] {p.rows_in_page:>7d} rows  "
+            f"total={p.rows_total_so_far:>10d}  "
+            f"{p.rows_per_sec:>9.1f} rows/s  "
+            f"elapsed={p.elapsed_s:>5.1f}s",
+            err=True,
+        )
+
     result = run_backfill(
         datasource=datasource,
         pinot_table=pinot_table,
@@ -195,9 +208,15 @@ def command(
         sink=sink,
         page_rows=page_rows,
         time_column=time_column,
+        progress_callback=_print_progress,
     )
     typer.echo(
         f"Backfill complete: {result.rows_dumped} rows in {result.pages_dumped} "
         f"pages → Pinot table {pinot_table}_OFFLINE"
     )
+    if result.pages_resumed:
+        typer.echo(
+            f"  resumed from page {result.pages_resumed} "
+            f"(skipped pages already ingested in a previous run)",
+        )
     typer.echo(f"  staging directory: {result.staging_dir}")
