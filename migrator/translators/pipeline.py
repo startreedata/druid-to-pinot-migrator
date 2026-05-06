@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from migrator.core.errors import ParseError
-from migrator.core.models import CanonicalMigrationModel
+from migrator.core.models import CanonicalMigrationModel, UpsertConfig
 from migrator.core.result_types import (
     AnalyzeResult,
     GenerateResult,
@@ -107,8 +107,18 @@ def generate_bundle(
     path: str,
     out_dir: str,
     dry_run: bool = False,
+    upsert_config: "UpsertConfig | None" = None,
 ) -> GenerateResult:
-    """Full pipeline: parse -> normalize -> classify -> generate -> risk-analyze -> validate -> report."""
+    """Full pipeline: parse -> normalize -> classify -> generate -> risk-analyze -> validate -> report.
+
+    ``upsert_config`` (optional) is operator-supplied — Druid has no
+    row-level upsert, so dpm can't derive this from the source spec.
+    When set, the generator emits an upsert REALTIME table; the schema
+    gets ``primaryKeyColumns`` declared, and the table config gets
+    ``upsertConfig`` + ``routing.instanceSelectorType=strictReplicaGroup``.
+    Validation (source_kind=stream, primary key columns exist) happens
+    after normalization.
+    """
     files_written: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
@@ -164,6 +174,65 @@ def generate_bundle(
     # ------------------------------------------------------------------ #
     classification = classify_datasource(canonical)
     canonical.classification = classification.value
+
+    # ------------------------------------------------------------------ #
+    # Upsert config (operator-supplied)
+    # ------------------------------------------------------------------ #
+    # Druid has no row-level upsert, so this can't be derived from the
+    # source spec. When the operator passes ``--upsert-primary-key``
+    # (etc.) on the CLI, we apply the config to canonical and validate.
+    if upsert_config is not None and upsert_config.enabled:
+        # Pinot upsert is REALTIME-only; the OFFLINE table can't be
+        # upsert-shaped because historical segments are immutable.
+        if canonical.source_kind != "stream":
+            return GenerateResult(
+                success=False,
+                output_dir=out_dir,
+                errors=[
+                    "--upsert-primary-key requires a streaming source "
+                    f"(source_kind=stream); spec has source_kind="
+                    f"{canonical.source_kind}. Pinot OFFLINE tables "
+                    "cannot be upsert-shaped — historical segments are "
+                    "immutable."
+                ],
+                warnings=warnings,
+            )
+        # Validate every primary-key column actually exists. The user
+        # gets a clear list of valid candidates rather than an
+        # opaque Pinot deploy-time failure.
+        known_columns = {d.name for d in canonical.dimensions}
+        if canonical.time_field is not None:
+            known_columns.add(canonical.time_field.column_name)
+        unknown_pks = [
+            pk for pk in upsert_config.primary_key
+            if pk not in known_columns
+        ]
+        if unknown_pks:
+            return GenerateResult(
+                success=False,
+                output_dir=out_dir,
+                errors=[
+                    f"upsert primary key(s) {unknown_pks} not found in "
+                    f"canonical dimensions / time field. "
+                    f"Known columns: {sorted(known_columns)}."
+                ],
+                warnings=warnings,
+            )
+        # Validate comparison column too (when explicitly set).
+        comparison = upsert_config.comparison_column
+        if comparison and comparison not in known_columns and comparison not in {
+            m.name for m in canonical.metrics
+        }:
+            return GenerateResult(
+                success=False,
+                output_dir=out_dir,
+                errors=[
+                    f"upsert comparison column '{comparison}' not found "
+                    f"in canonical dimensions / metrics / time field."
+                ],
+                warnings=warnings,
+            )
+        canonical.upsert = upsert_config
 
     # ------------------------------------------------------------------ #
     # Generate schema

@@ -52,6 +52,35 @@ class RetentionHint(BaseModel):
     notes: str = ""
 
 
+class UpsertConfig(BaseModel):
+    """Pinot upsert-table configuration.
+
+    Druid is fundamentally append-only at the row level — there's no
+    Druid-side analogue of Pinot's primary-key upsert. This config is
+    therefore not derived from the source Druid spec; the operator
+    declares it explicitly via CLI flags when they want the migrated
+    table to deduplicate by PK in Pinot.
+
+    Pinot upsert is REALTIME-only (the OFFLINE table is never
+    upsert-shaped — historical segments are immutable). The generator
+    treats ``enabled=True`` together with a non-stream source_kind as
+    a configuration error.
+    """
+    enabled: bool = False
+    primary_key: list[str] = Field(default_factory=list)
+    # Pinot needs a column to break ties when two rows share the same
+    # primary key — typically a timestamp. Defaults to the canonical
+    # ``time_field.column_name`` when None.
+    comparison_column: str | None = None
+    # ``FULL`` replaces the whole row; ``PARTIAL`` only the columns
+    # listed in ``partial_columns``.
+    mode: str = "FULL"
+    # For PARTIAL mode: column → partial-update strategy. Pinot
+    # supports OVERWRITE, INCREMENT, APPEND, UNION, MIN, MAX. Empty
+    # for FULL mode.
+    partial_columns: dict[str, str] = Field(default_factory=dict)
+
+
 class UnsupportedFeature(BaseModel):
     feature: str
     reason: str
@@ -87,6 +116,11 @@ class CanonicalMigrationModel(BaseModel):
     # and preserves backward compatibility with specs that pre-date this
     # field. Unknown formats fall back to ``json`` with a warning.
     input_format: str = "json"
+    # Optional Pinot-side upsert config. Populated from CLI flags on
+    # ``dpm generate`` / ``dpm cutover`` rather than from the Druid
+    # spec — Druid has no row-level upsert, so the decision to make
+    # the migrated table upsert-shaped is operator-driven.
+    upsert: UpsertConfig = Field(default_factory=UpsertConfig)
     raw_io_config: dict = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
