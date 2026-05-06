@@ -130,6 +130,16 @@ def command(
             "where the previous run left off (skipping phases marked ok)."
         ),
     ),
+    notify_webhook: str | None = typer.Option(
+        None, "--notify-webhook",
+        help=(
+            "POST a Slack-compatible JSON summary to this URL when the "
+            "cutover finishes (success OR failure). The orchestrator's "
+            "exit code is unchanged either way — a failed webhook delivery "
+            "doesn't fail the cutover. Slack incoming-webhook URLs work "
+            "directly; Discord works via its Slack-compat path."
+        ),
+    ),
     restart_from: str | None = typer.Option(
         None, "--restart-from",
         help=(
@@ -280,6 +290,36 @@ def command(
 
     typer.echo("")
     typer.echo(f"Report: {report.out_dir}/cutover-report.json")
+
+    # Operator-supplied webhook fires AFTER the report file is on
+    # disk so the link in the message is valid. Webhook failure is
+    # non-fatal — the cutover already succeeded or failed for its
+    # own reasons.
+    if notify_webhook:
+        from migrator.notifiers.webhook import (
+            notify_webhook as _post,
+            slack_payload_from_summary,
+        )
+        payload = slack_payload_from_summary(
+            datasource=datasource,
+            pinot_table=pinot_table,
+            success=report.all_ok,
+            steps=[
+                {"step": s.step, "status": s.status, "detail": s.detail}
+                for s in report.steps
+            ],
+            parity_failed=sum(1 for r in report.parity if not r.passed),
+            out_dir=str(report.out_dir) if report.out_dir else None,
+        )
+        result = _post(notify_webhook, payload)
+        if result.ok:
+            typer.echo(f"Webhook delivered ({result.status_code}).")
+        else:
+            typer.echo(
+                f"Webhook delivery failed ({result.status_code}): "
+                f"{result.detail}",
+                err=True,
+            )
 
     if not report.all_ok:
         raise typer.Exit(code=1)
