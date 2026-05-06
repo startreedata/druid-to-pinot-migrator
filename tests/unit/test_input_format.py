@@ -352,6 +352,86 @@ class TestEndToEndAvroBatch:
         assert "S3PinotFS" in job["pinotFSSpecs"][0]["className"]
 
 
+class TestEndToEndOrcBatch:
+    """The ``orc_input`` fixture mirrors ``parquet_input`` but with a
+    GCS source — exercises the GcsPinotFS dispatch as a side effect."""
+
+    def test_orc_fixture_produces_orc_record_reader(self):
+        raw = json.loads((FIXTURES / "orc_input" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        assert canonical.input_format == "orc"
+        job = PinotIngestionGenerator().generate_batch_job(canonical)
+        assert job["recordReaderSpec"]["dataFormat"] == "orc"
+        assert "ORCRecordReader" in job["recordReaderSpec"]["className"]
+
+    def test_orc_fixture_emits_gcs_pinot_fs(self):
+        # Druid spec uses ``inputSource.type=google`` with gs:// URIs;
+        # the generator should pick GcsPinotFS, not LocalPinotFS.
+        raw = json.loads((FIXTURES / "orc_input" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        job = PinotIngestionGenerator().generate_batch_job(canonical)
+        fs = job["pinotFSSpecs"][0]
+        assert fs["scheme"] == "gs"
+        assert "GcsPinotFS" in fs["className"]
+        assert job["inputDirURI"].startswith("gs://prod-warehouse/")
+
+
+class TestEndToEndCsvBatch:
+    """CSV is the ``oddball`` of the supported formats — Druid carries
+    extra knobs (``columns``, ``delimiter``, ``skipHeaderRows``) that
+    Pinot's CSVRecordReader can read out of the same dispatch. The
+    fixture is local-FS to lock the LocalPinotFS path too."""
+
+    def test_csv_fixture_produces_csv_record_reader(self):
+        raw = json.loads((FIXTURES / "csv_input" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        assert canonical.input_format == "csv"
+        job = PinotIngestionGenerator().generate_batch_job(canonical)
+        assert job["recordReaderSpec"]["dataFormat"] == "csv"
+        assert "CSVRecordReader" in job["recordReaderSpec"]["className"]
+
+    def test_csv_fixture_uses_local_pinot_fs(self):
+        raw = json.loads((FIXTURES / "csv_input" / "spec.json").read_text())
+        canonical = _canonical(raw)
+        job = PinotIngestionGenerator().generate_batch_job(canonical)
+        assert job["pinotFSSpecs"][0]["scheme"] == "file"
+        assert "LocalPinotFS" in job["pinotFSSpecs"][0]["className"]
+
+
+class TestAllFixtureInputFormatCoverage:
+    """Belt-and-suspenders: assert every input format mentioned in
+    ``_PINOT_RECORD_READERS`` has at least one fixture-backed
+    end-to-end test in this module. If someone adds a new format
+    without a fixture, this test fails loudly so the gap can't go
+    unnoticed.
+
+    JSON is the implicit default and is exercised by every existing
+    Druid fixture (raw_batch / raw_stream / etc), so it's allowed to
+    not have a dedicated ``json_input`` directory.
+    """
+    EXPECTED_FIXTURE_DIRS = {
+        # input_format → at least one fixture directory under tests/fixtures/
+        "json":     {"raw_batch", "raw_stream"},
+        "parquet":  {"parquet_input"},
+        "avro":     {"avro_ocf", "avro_stream", "avro_stream_auth"},
+        "orc":      {"orc_input"},
+        "csv":      {"csv_input"},
+        "protobuf": {"protobuf_stream", "protobuf_file"},
+    }
+
+    @pytest.mark.parametrize("input_format, expected_dirs", list(EXPECTED_FIXTURE_DIRS.items()))
+    def test_each_format_has_at_least_one_fixture(
+        self, input_format: str, expected_dirs: set[str],
+    ):
+        present = {p.name for p in FIXTURES.iterdir() if p.is_dir()}
+        overlap = expected_dirs & present
+        assert overlap, (
+            f"input_format={input_format!r} has no fixture directory "
+            f"under tests/fixtures/. Expected one of: {sorted(expected_dirs)}. "
+            f"Add a fixture and an end-to-end test in test_input_format.py."
+        )
+
+
 class TestEndToEndAvroStream:
     def test_avro_stream_fixture_produces_confluent_decoder(self):
         raw = json.loads((FIXTURES / "avro_stream" / "spec.json").read_text())

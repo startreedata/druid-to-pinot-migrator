@@ -1,0 +1,40 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "weblogs",
+      "timestampSpec": {
+        "column": "ts",
+        "format": "millis"
+      },
+      "dimensionsSpec": {
+        "dimensions": ["host", "method", "status_code"]
+      },
+      "metricsSpec": [
+        {"type": "count",   "name": "requests"},
+        {"type": "longSum", "name": "bytes_sum", "fieldName": "bytes"}
+      ],
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true,
+        "intervals": ["2024-01-01/2024-02-01"]
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "local",
+        "baseDir": "/data/weblogs",
+        "filter": "*.csv"
+      },
+      "inputFormat": {
+        "type": "csv",
+        "columns": ["ts", "host", "method", "status_code", "bytes"],
+        "delimiter": ",",
+        "skipHeaderRows": 1
+      }
+    }
+  }
+}
