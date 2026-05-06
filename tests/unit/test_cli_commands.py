@@ -589,6 +589,76 @@ class TestCutoverCommand:
         ])
         assert result.exit_code == 2
 
+    def test_cutover_notify_webhook_posts_on_success(self, tmp_path: Path):
+        # End-to-end: --notify-webhook reaches the notifier, which is
+        # called with a Slack-shaped payload after the run finishes.
+        # We mock both run_cutover (so no real clusters needed) AND
+        # notify_webhook (so no real HTTP). The assertion is on
+        # whether the CLI wired the two together correctly.
+        spec = FIXTURES / "raw_stream" / "spec.json"
+        captured: dict = {}
+
+        from migrator.notifiers.webhook import WebhookResult
+
+        def fake_notify(url, payload, **_kwargs):
+            captured["url"] = url
+            captured["payload"] = payload
+            return WebhookResult(ok=True, status_code=200)
+
+        with patch(
+            "migrator.cli.commands.cutover.run_cutover",
+            return_value=_ok_cutover_report(tmp_path / "out"),
+        ), patch(
+            "migrator.notifiers.webhook.notify_webhook",
+            side_effect=fake_notify,
+        ):
+            result = runner.invoke(app, [
+                "cutover",
+                "--supervisor-id", "sup1",
+                "--datasource", "events",
+                "--pinot-table", "events",
+                "--spec", str(spec),
+                "--out", str(tmp_path / "out"),
+                "--notify-webhook", "http://hooks.slack.com/services/X/Y/Z",
+            ])
+        assert result.exit_code == 0, result.output
+        assert captured["url"] == "http://hooks.slack.com/services/X/Y/Z"
+        # Payload uses success emoji + datasource + table in the headline.
+        assert "events" in captured["payload"]["text"]
+        assert ":white_check_mark:" in captured["payload"]["text"]
+        # CLI confirms delivery to the operator.
+        assert "Webhook delivered" in result.output
+
+    def test_cutover_webhook_failure_does_not_abort(self, tmp_path: Path):
+        # If the webhook server is down, the cutover's exit code is
+        # unchanged — the operator's notification is a courtesy, not
+        # load-bearing on data correctness.
+        spec = FIXTURES / "raw_stream" / "spec.json"
+        from migrator.notifiers.webhook import WebhookResult
+
+        with patch(
+            "migrator.cli.commands.cutover.run_cutover",
+            return_value=_ok_cutover_report(tmp_path / "out"),
+        ), patch(
+            "migrator.notifiers.webhook.notify_webhook",
+            return_value=WebhookResult(
+                ok=False, status_code=None, detail="connection refused",
+            ),
+        ):
+            result = runner.invoke(app, [
+                "cutover",
+                "--supervisor-id", "sup1",
+                "--datasource", "events",
+                "--pinot-table", "events",
+                "--spec", str(spec),
+                "--out", str(tmp_path / "out"),
+                "--notify-webhook", "http://nope.invalid/",
+            ])
+        # Cutover succeeded (mock returned all_ok), so exit 0 — webhook
+        # failure is logged on stderr but doesn't change the exit code.
+        assert result.exit_code == 0
+        assert "Webhook delivery failed" in result.output
+
     def test_cutover_no_resume_flag_threads_through(self, tmp_path: Path):
         # Verify the --no-resume flag reaches the orchestrator's
         # CutoverConfig. We don't run a real cutover; we just check
