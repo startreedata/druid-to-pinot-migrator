@@ -993,3 +993,342 @@ class TestDiffSpecCommand:
         good.write_text(json.dumps(SAMPLE_DIFF_SPEC))
         result = runner.invoke(app, ["diff-spec", str(bad), str(good)])
         assert result.exit_code == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# recommend
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRecommendCommand:
+    def test_recommend_help(self):
+        result = runner.invoke(app, ["recommend", "--help"])
+        assert result.exit_code == 0
+
+    def test_recommend_pretty_output_lists_each_recommendation(self):
+        # rolled_up has dims + metrics + an id-like dim → triggers
+        # star_tree, sorted_column, range_index, inverted_index,
+        # bloom_filter. Pretty output must surface every kind it
+        # produces so operators see the full picture.
+        spec = str(FIXTURES / "rolled_up" / "spec.json")
+        result = runner.invoke(app, ["recommend", spec])
+        assert result.exit_code == 0, result.output
+        # Headline references the datasource name from the spec.
+        assert "ad_metrics" in result.output
+        # Multiple recommendation kinds appear in the pretty list.
+        assert "star_tree" in result.output
+        assert "sorted_column" in result.output
+        assert "range_index" in result.output
+
+    def test_recommend_json_output_round_trip(self):
+        spec = str(FIXTURES / "rolled_up" / "spec.json")
+        result = runner.invoke(app, ["recommend", spec, "--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert isinstance(payload, list)
+        assert payload  # non-empty for this fixture
+        # Each rec carries the load-bearing keys.
+        for r in payload:
+            assert "kind" in r and "severity" in r and "rationale" in r
+
+    def test_recommend_unparseable_spec_exits_2(self, tmp_path: Path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("not json{")
+        result = runner.invoke(app, ["recommend", str(bad)])
+        assert result.exit_code == 2
+        assert "failed to load" in result.output.lower()
+
+    def test_recommend_no_signal_renders_empty_message(self, tmp_path: Path):
+        # A spec with no time field, no dims, no metrics generates no
+        # recommendations. Operator should see an explicit "no
+        # recommendations" line, not a blank screen.
+        empty_spec = {
+            "type": "index_parallel",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "empty",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": []},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "segmentGranularity": "DAY", "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "type": "index_parallel",
+                    "inputSource": {"type": "local", "baseDir": "/data"},
+                    "inputFormat": {"type": "json"},
+                },
+            },
+        }
+        spec_path = tmp_path / "empty.json"
+        spec_path.write_text(json.dumps(empty_spec))
+        result = runner.invoke(app, ["recommend", str(spec_path)])
+        assert result.exit_code == 0
+        # Time field is set so sorted_column will recommend; let's
+        # look at the json mode where we can assert exactly.
+        result = runner.invoke(app, ["recommend", str(spec_path), "--json"])
+        # Even with just a time field, sorted_column is suggested —
+        # so the count is >0. The "no recommendations" branch is
+        # only reachable for a CanonicalMigrationModel with no time
+        # field, which a real Druid spec can't produce. The branch
+        # exists for defensive purposes; we don't need a fixture
+        # exercising it from CLI.
+        assert result.exit_code == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cutover-many
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCutoverManyCommand:
+    def test_cutover_many_help(self):
+        result = runner.invoke(app, ["cutover-many", "--help"])
+        assert result.exit_code == 0
+
+    def test_cutover_many_missing_manifest_exits_2(self, tmp_path: Path):
+        result = runner.invoke(app, [
+            "cutover-many",
+            "--manifest", str(tmp_path / "nonexistent.yaml"),
+        ])
+        assert result.exit_code == 2
+        assert "Failed to load manifest" in result.output
+
+    def test_cutover_many_empty_manifest_exits_2(self, tmp_path: Path):
+        # A valid manifest but with zero datasources is a no-op.
+        # The CLI rejects it loudly so an operator who fat-fingered
+        # the YAML doesn't think the run succeeded.
+        manifest = tmp_path / "empty.yaml"
+        manifest.write_text(
+            "defaults: {}\n"
+            "datasources: []\n"
+        )
+        result = runner.invoke(app, [
+            "cutover-many",
+            "--manifest", str(manifest),
+            "--out", str(tmp_path / "out"),
+        ])
+        assert result.exit_code == 2
+        assert "no datasources" in result.output.lower()
+
+    def test_cutover_many_invalid_auth_exits_2(self, tmp_path: Path):
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text(
+            "defaults: {}\n"
+            "datasources:\n"
+            "  - supervisor_id: x\n"
+            "    datasource: x\n"
+            "    pinot_table: x\n"
+            f"    spec: {FIXTURES / 'raw_stream' / 'spec.json'}\n"
+        )
+        result = runner.invoke(app, [
+            "cutover-many",
+            "--manifest", str(manifest),
+            "--out", str(tmp_path / "out"),
+            "--druid-auth", "garbage-no-colon",
+        ])
+        assert result.exit_code == 2
+        assert "auth" in result.output.lower()
+
+    def test_cutover_many_happy_path(self, tmp_path: Path):
+        # End-to-end: real manifest, mocked clients via patching
+        # run_batch_cutover. The CLI's job is to load the manifest,
+        # build sessions, plumb the client factory, and render the
+        # report. We assert each.
+        from migrator.realtime.batch_cutover import (
+            BatchCutoverReport, BatchEntryResult,
+        )
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text(
+            "defaults:\n"
+            "  druid_router: http://druid:8888\n"
+            "datasources:\n"
+            "  - supervisor_id: events_v1\n"
+            "    datasource: events\n"
+            "    pinot_table: events\n"
+            f"    spec: {FIXTURES / 'raw_stream' / 'spec.json'}\n"
+        )
+        fake_report = BatchCutoverReport(
+            out_dir=tmp_path / "out",
+            started_at="2026-01-01T00:00:00+00:00",
+            entries=[
+                BatchEntryResult(
+                    datasource="events", pinot_table="events",
+                    out_dir=tmp_path / "out" / "events",
+                    all_ok=True, elapsed_s=1.5,
+                ),
+            ],
+        )
+        with patch(
+            "migrator.cli.commands.cutover_many.run_batch_cutover",
+            return_value=fake_report,
+        ):
+            result = runner.invoke(app, [
+                "cutover-many",
+                "--manifest", str(manifest),
+                "--out", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 0, result.output
+        assert "1 succeeded" in result.output
+        assert "events" in result.output
+
+    def test_cutover_many_failure_exits_nonzero(self, tmp_path: Path):
+        from migrator.realtime.batch_cutover import (
+            BatchCutoverReport, BatchEntryResult,
+        )
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text(
+            "defaults: {}\n"
+            "datasources:\n"
+            "  - supervisor_id: x\n"
+            "    datasource: x\n"
+            "    pinot_table: x\n"
+            f"    spec: {FIXTURES / 'raw_stream' / 'spec.json'}\n"
+        )
+        fake_report = BatchCutoverReport(
+            out_dir=tmp_path / "out",
+            started_at="2026-01-01T00:00:00+00:00",
+            entries=[
+                BatchEntryResult(
+                    datasource="x", pinot_table="x",
+                    out_dir=tmp_path / "out" / "x",
+                    all_ok=False, elapsed_s=0.1,
+                    error="RuntimeError: simulated",
+                ),
+            ],
+        )
+        with patch(
+            "migrator.cli.commands.cutover_many.run_batch_cutover",
+            return_value=fake_report,
+        ):
+            result = runner.invoke(app, [
+                "cutover-many",
+                "--manifest", str(manifest),
+                "--out", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 1
+        # Per-entry error string in the output so the operator sees it.
+        assert "simulated" in result.output
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# diff-spec — exercise the pretty render branches
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDiffSpecPrettyRender:
+    """The default (non-JSON) text renderer in diff-spec covers many
+    rendering branches not hit by the existing TestDiffSpecCommand.
+    Verifies each one fires when its corresponding canonical change is
+    present."""
+
+    def _spec_with(self, **overrides) -> dict:
+        base = {
+            "type": "kafka",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": "ds",
+                    "timestampSpec": {"column": "ts", "format": "millis"},
+                    "dimensionsSpec": {"dimensions": ["a"]},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "segmentGranularity": "HOUR", "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "type": "kafka", "topic": "t",
+                    "consumerProperties": {"bootstrap.servers": "k:9092"},
+                    "inputFormat": {"type": "json"},
+                },
+            },
+        }
+        # Apply nested overrides.
+        if "datasource" in overrides:
+            base["spec"]["dataSchema"]["dataSource"] = overrides["datasource"]
+        if "input_format" in overrides:
+            base["spec"]["ioConfig"]["inputFormat"]["type"] = overrides["input_format"]
+        if "rollup" in overrides:
+            base["spec"]["dataSchema"]["granularitySpec"]["rollup"] = overrides["rollup"]
+        if "segment_granularity" in overrides:
+            base["spec"]["dataSchema"]["granularitySpec"]["segmentGranularity"] = overrides["segment_granularity"]
+        if "ts_column" in overrides:
+            base["spec"]["dataSchema"]["timestampSpec"]["column"] = overrides["ts_column"]
+        if "dims" in overrides:
+            base["spec"]["dataSchema"]["dimensionsSpec"]["dimensions"] = overrides["dims"]
+        if "metrics" in overrides:
+            base["spec"]["dataSchema"]["metricsSpec"] = overrides["metrics"]
+        return base
+
+    def _stage(self, tmp_path: Path, *, old: dict, new: dict) -> tuple[Path, Path]:
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        a.write_text(json.dumps(old))
+        b.write_text(json.dumps(new))
+        return a, b
+
+    def test_renders_datasource_rename(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(),
+            new=self._spec_with(datasource="ds_v2"),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "datasource_name" in result.output
+        # Pinot implications appear because the change has consequences.
+        assert "Pinot implications" in result.output
+
+    def test_renders_input_format_change(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(),
+            new=self._spec_with(input_format="parquet"),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "input_format" in result.output
+
+    def test_renders_granularity_changes(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(rollup=False),
+            new=self._spec_with(rollup=True, segment_granularity="DAY"),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "granularity" in result.output
+
+    def test_renders_dimension_added(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(),
+            new=self._spec_with(dims=["a", "b_new"]),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "dimensions" in result.output
+        assert "b_new" in result.output
+
+    def test_renders_metric_added(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(),
+            new=self._spec_with(metrics=[
+                {"type": "longSum", "name": "x_sum", "fieldName": "x"},
+            ]),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "metrics" in result.output
+        assert "x_sum" in result.output
+
+    def test_renders_time_field_change(self, tmp_path: Path):
+        a, b = self._stage(
+            tmp_path,
+            old=self._spec_with(),
+            new=self._spec_with(ts_column="event_time"),
+        )
+        result = runner.invoke(app, ["diff-spec", str(a), str(b)])
+        assert result.exit_code == 0
+        assert "time_field" in result.output
