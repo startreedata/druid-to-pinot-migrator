@@ -1,0 +1,8 @@
+{
+  "query": "REPLACE INTO events OVERWRITE WHERE __time >= TIMESTAMP '2024-01-01' AND __time < TIMESTAMP '2024-02-01' SELECT TIME_FLOOR(__time, 'PT1H') AS __time, region, device, COUNT(*) AS event_count, SUM(amount) AS amount_sum, MAX(latency_ms) AS latency_max FROM TABLE(EXTERN('s3://prod-events/year=2024/', '{\"type\":\"json\"}', '[{\"name\":\"__time\",\"type\":\"long\"},{\"name\":\"region\",\"type\":\"string\"},{\"name\":\"device\",\"type\":\"string\"},{\"name\":\"amount\",\"type\":\"double\"},{\"name\":\"latency_ms\",\"type\":\"long\"}]')) GROUP BY 1, 2, 3 PARTITIONED BY HOUR CLUSTERED BY region, device",
+  "context": {
+    "executionMode": "ASYNC",
+    "maxNumTasks": 4,
+    "useApproximateCountDistinct": false
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "query": "INSERT INTO orders SELECT __time, country, channel, SUM(revenue) AS revenue_sum, COUNT(*) AS order_count FROM TABLE(EXTERN('s3://orders-warehouse/year=2024/', '{\"type\":\"parquet\"}', '[{\"name\":\"__time\",\"type\":\"long\"},{\"name\":\"country\",\"type\":\"string\"},{\"name\":\"channel\",\"type\":\"string\"},{\"name\":\"revenue\",\"type\":\"double\"}]')) GROUP BY 1, 2, 3 PARTITIONED BY DAY",
+  "context": {"executionMode": "ASYNC"}
+}

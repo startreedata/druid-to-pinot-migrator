@@ -11,6 +11,7 @@ from migrator.druid.models import (
     DruidTimestampSpec,
     DruidTransformSpec,
 )
+from migrator.druid.msq_parser import looks_like_msq, parse_msq_spec
 
 
 class DruidSpecParser:
@@ -19,6 +20,26 @@ class DruidSpecParser:
     def parse(self, raw: dict) -> ParseResult:
         errors: list[str] = []
         warnings: list[str] = []
+
+        # MSQ specs (``{"query": "INSERT INTO ... SELECT ..."}``) take
+        # a different path — the SQL string is parsed via sqlglot and
+        # translated into the same ``DruidParsedSpec`` shape so the
+        # rest of the pipeline (normalize → generate → validate) is
+        # untouched.
+        if looks_like_msq(raw):
+            try:
+                parsed_spec, msq_warnings = parse_msq_spec(raw)
+            except ParseError as exc:
+                return ParseResult(
+                    success=False, parsed_spec=None,
+                    errors=[str(exc)], warnings=warnings,
+                )
+            return ParseResult(
+                success=True,
+                parsed_spec=parsed_spec,
+                errors=[],
+                warnings=msq_warnings,
+            )
 
         try:
             # Locate dataSchema — supports nested spec.dataSchema or top-level dataSchema
