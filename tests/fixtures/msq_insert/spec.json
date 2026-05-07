@@ -1,0 +1,4 @@
+{
+  "query": "INSERT INTO sessions SELECT __time, user_id, country, COUNT(*) AS session_count FROM TABLE(EXTERN('gs://analytics-prod/sessions/', '{\"type\":\"json\"}', '[{\"name\":\"__time\",\"type\":\"long\"},{\"name\":\"user_id\",\"type\":\"string\"},{\"name\":\"country\",\"type\":\"string\"}]')) GROUP BY 1, 2, 3 PARTITIONED BY DAY",
+  "context": {"executionMode": "ASYNC"}
+}
