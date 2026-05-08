@@ -1332,3 +1332,128 @@ class TestDiffSpecPrettyRender:
         result = runner.invoke(app, ["diff-spec", str(a), str(b)])
         assert result.exit_code == 0
         assert "time_field" in result.output
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cluster-report
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestClusterReportCommand:
+    def test_cluster_report_help(self):
+        result = runner.invoke(app, ["cluster-report", "--help"])
+        assert result.exit_code == 0
+
+    def test_cluster_report_invalid_auth_exits_2(self, tmp_path: Path):
+        result = runner.invoke(app, [
+            "cluster-report",
+            "--druid-coordinator", "http://localhost:8081",
+            "--out", str(tmp_path / "out"),
+            "--druid-auth", "garbage-no-colon",
+        ])
+        assert result.exit_code == 2
+
+    def test_cluster_report_happy_path_writes_artifacts(self, tmp_path: Path):
+        # Mock the inspector to return a clean GREEN report; assert
+        # the CLI wires through to write_report and prints the
+        # summary table + report paths.
+        from migrator.cluster.inspector import (
+            COMPAT_GREEN, ClusterReport, DatasourceReport,
+        )
+        fake_report = ClusterReport(
+            coordinator_url="http://druid:8081",
+            overlord_url=None,
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:01+00:00",
+        )
+        fake_report.datasources = [
+            DatasourceReport(
+                datasource="events", compat=COMPAT_GREEN,
+                source_kind="batch", classification="raw_event",
+            ),
+        ]
+        with patch(
+            "migrator.cli.commands.cluster_report.inspect_cluster",
+            return_value=fake_report,
+        ):
+            result = runner.invoke(app, [
+                "cluster-report",
+                "--druid-coordinator", "http://druid:8081",
+                "--out", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 0, result.output
+        # Summary table printed to stdout.
+        assert "GREEN" in result.output
+        # The artifacts landed.
+        assert (tmp_path / "out" / "summary.json").exists()
+        assert (tmp_path / "out" / "cluster-report.md").exists()
+
+    def test_cluster_report_fail_on_red_exit_code(self, tmp_path: Path):
+        from migrator.cluster.inspector import (
+            COMPAT_RED, ClusterReport, DatasourceReport,
+        )
+        fake_report = ClusterReport(
+            coordinator_url="http://druid:8081",
+            overlord_url=None,
+            started_at="t",
+        )
+        fake_report.datasources = [
+            DatasourceReport(
+                datasource="bad", compat=COMPAT_RED,
+                source_kind="batch",
+                risks=[{"risk_id": "ROLLUP_MISMATCH", "severity": "HIGH",
+                        "confidence": "HIGH", "description": "..."}],
+            ),
+        ]
+        with patch(
+            "migrator.cli.commands.cluster_report.inspect_cluster",
+            return_value=fake_report,
+        ):
+            # Without --fail-on-red, exit stays 0 even when RED is present.
+            result = runner.invoke(app, [
+                "cluster-report",
+                "--druid-coordinator", "http://druid:8081",
+                "--out", str(tmp_path / "out"),
+            ])
+            assert result.exit_code == 0
+            # With --fail-on-red, exit 3 — distinct from config (2)
+            # and run errors (1).
+            result = runner.invoke(app, [
+                "cluster-report",
+                "--druid-coordinator", "http://druid:8081",
+                "--out", str(tmp_path / "out2"),
+                "--fail-on-red",
+            ])
+            assert result.exit_code == 3
+
+    def test_cluster_report_datasource_filter_threads_through(self, tmp_path: Path):
+        from migrator.cluster.inspector import (
+            COMPAT_GREEN, ClusterReport, DatasourceReport,
+        )
+        captured: dict = {}
+
+        def fake_inspect(**kwargs):
+            captured.update(kwargs)
+            r = ClusterReport(
+                coordinator_url=kwargs.get("coordinator_url", ""),
+                overlord_url=kwargs.get("overlord_url"),
+                started_at="t",
+            )
+            r.datasources = [DatasourceReport(
+                datasource="a", compat=COMPAT_GREEN, source_kind="batch",
+            )]
+            return r
+
+        with patch(
+            "migrator.cli.commands.cluster_report.inspect_cluster",
+            side_effect=fake_inspect,
+        ):
+            result = runner.invoke(app, [
+                "cluster-report",
+                "--druid-coordinator", "http://druid:8081",
+                "--out", str(tmp_path / "out"),
+                "--datasource", "a",
+                "--datasource", "b",
+            ])
+        assert result.exit_code == 0
+        assert captured["datasources"] == ["a", "b"]

@@ -4,6 +4,7 @@ import typer
 
 from migrator.cli.commands import (
     backfill_batch,
+    cluster_report,
     cutover,
     cutover_many,
     deploy,
@@ -29,6 +30,8 @@ app.command("generate")(generate.command)
 app.command("validate")(validate.command)
 # Cluster-introspection commands
 app.command("extract-spec")(extract_spec.command)
+# Whole-cluster compatibility report
+app.command("cluster-report")(cluster_report.command)
 # Hybrid (REALTIME + OFFLINE) migration commands
 app.command("extract-offsets")(extract_offsets.command)
 app.command("plan-hybrid")(plan_hybrid.command)
