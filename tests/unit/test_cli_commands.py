@@ -1457,3 +1457,124 @@ class TestClusterReportCommand:
             ])
         assert result.exit_code == 0
         assert captured["datasources"] == ["a", "b"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# parity-check --check-columns
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestParityCheckColumnPresence:
+    def test_check_columns_requires_from_canonical(self, tmp_path: Path):
+        # --check-columns needs the canonical column list. With
+        # --queries (manual list) the CLI doesn't know what to
+        # compare; reject with a clear message rather than running
+        # silently with zero columns.
+        queries = tmp_path / "q.json"
+        queries.write_text(json.dumps({
+            "queries": [{
+                "label": "row count",
+                "druid": "SELECT COUNT(*) FROM events",
+                "pinot": "SELECT COUNT(*) FROM events",
+            }],
+        }))
+        result = runner.invoke(app, [
+            "parity-check",
+            "--queries", str(queries),
+            "--pinot-table", "events",
+            "--check-columns",
+        ])
+        assert result.exit_code == 2
+        assert "--from-canonical" in result.output
+
+    def test_check_columns_appends_results_to_existing(self, tmp_path: Path):
+        # When --check-columns is set with --from-canonical, the
+        # column-presence results land alongside the auto-derived
+        # aggregate parity results. A failing column-presence check
+        # flips the overall exit code to 1.
+        spec = FIXTURES / "raw_batch" / "spec.json"
+        from migrator.parity.models import ParityResult
+
+        # Stub run_parity (aggregate side) → all pass.
+        # Stub run_column_presence → one column-presence failure.
+        with patch(
+            "migrator.cli.commands.parity_check.run_parity",
+            return_value=[ParityResult(
+                label="row count", passed=True, detail="ok",
+                druid_value=10, pinot_value=10,
+            )],
+        ), patch(
+            "migrator.parity.column_presence.run_column_presence",
+            return_value=[ParityResult(
+                label="column presence: region",
+                passed=False,
+                detail="column 'region': null-rate divergence "
+                       "druid=0.0% pinot=70.0%",
+                druid_value=0.0, pinot_value=0.7,
+            )],
+        ):
+            result = runner.invoke(app, [
+                "parity-check",
+                "--pinot-table", "pageviews",
+                "--from-canonical", str(spec),
+                "--check-columns",
+            ])
+        # Aggregate parity passed but column-presence failed → exit 1.
+        assert result.exit_code == 1
+        # The column-presence failure renders alongside the aggregate
+        # results — operator sees both in one report.
+        assert "column presence: region" in result.output
+        assert "row count" in result.output
+
+    def test_check_columns_passes_when_everything_matches(self, tmp_path: Path):
+        spec = FIXTURES / "raw_batch" / "spec.json"
+        from migrator.parity.models import ParityResult
+        with patch(
+            "migrator.cli.commands.parity_check.run_parity",
+            return_value=[ParityResult(
+                label="row count", passed=True, detail="ok",
+                druid_value=10, pinot_value=10,
+            )],
+        ), patch(
+            "migrator.parity.column_presence.run_column_presence",
+            return_value=[ParityResult(
+                label="column presence: region",
+                passed=True,
+                detail="column 'region': null-rates match druid=0% pinot=0%",
+                druid_value=0.0, pinot_value=0.0,
+            )],
+        ):
+            result = runner.invoke(app, [
+                "parity-check",
+                "--pinot-table", "pageviews",
+                "--from-canonical", str(spec),
+                "--check-columns",
+            ])
+        assert result.exit_code == 0
+
+    def test_null_rate_tolerance_threads_through(self, tmp_path: Path):
+        # The --null-rate-tolerance flag must reach run_column_presence.
+        spec = FIXTURES / "raw_batch" / "spec.json"
+        captured: dict = {}
+
+        def fake_check(*args, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        from migrator.parity.models import ParityResult
+        with patch(
+            "migrator.cli.commands.parity_check.run_parity",
+            return_value=[],
+        ), patch(
+            "migrator.parity.column_presence.run_column_presence",
+            side_effect=fake_check,
+        ):
+            result = runner.invoke(app, [
+                "parity-check",
+                "--pinot-table", "pageviews",
+                "--from-canonical", str(spec),
+                "--check-columns",
+                "--null-rate-tolerance", "0.02",
+            ])
+        assert result.exit_code == 0
+        assert captured.get("null_rate_tolerance") == 0.02
