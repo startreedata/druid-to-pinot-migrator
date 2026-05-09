@@ -383,6 +383,26 @@ class PinotTableGenerator:
         time_column = canonical.time_field.column_name if canonical.time_field else "__time"
         table_name = f"{canonical.datasource_name}_OFFLINE"
 
+        ingestion: dict = {
+            "batchIngestionConfig": {
+                "segmentIngestionType": "APPEND",
+                "segmentIngestionFrequency": "DAILY",
+            }
+        }
+        # Same per-row metric-column-rename trick the REALTIME path
+        # uses: when a Druid metricsSpec maps ``SUM(amount) AS
+        # amount_sum``, the canonical schema declares ``amount_sum``
+        # but the source rows still carry ``amount``. Without a
+        # transform, the Pinot column ends up 0/null. Pinot's batch
+        # ingestion CAN'T re-execute the GROUP BY (the analyzer
+        # warns about this separately via BATCH_AGGREGATION_NOT_REPLAYED),
+        # but emitting the rename means each row's source value
+        # lands in the right column — so SUM(amount_sum) at query
+        # time still produces the correct total, just over more rows.
+        transforms = build_realtime_transform_configs(canonical)
+        if transforms:
+            ingestion["transformConfigs"] = transforms
+
         return {
             "tableName": table_name,
             "tableType": "OFFLINE",
@@ -401,12 +421,7 @@ class PinotTableGenerator:
             "tableIndexConfig": {
                 "loadMode": "MMAP",
             },
-            "ingestionConfig": {
-                "batchIngestionConfig": {
-                    "segmentIngestionType": "APPEND",
-                    "segmentIngestionFrequency": "DAILY",
-                }
-            },
+            "ingestionConfig": ingestion,
             "metadata": {
                 "customConfigs": {}
             },

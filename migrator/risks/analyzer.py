@@ -16,6 +16,7 @@ from migrator.risks.taxonomy import (
     MULTIVALUE_AMBIGUITY,
     PARTITIONING_CONFIG_REQUIRED,
     RISK_DESCRIPTIONS,
+    BATCH_AGGREGATION_NOT_REPLAYED,
     ROLLUP_SEMANTIC_MISMATCH,
     STREAM_SOURCE_MISMATCH,
     TIME_SEMANTICS_MISMATCH,
@@ -57,6 +58,37 @@ class RiskAnalyzer:
                     ),
                 )
             )
+
+            # Batch + rollup + metrics is the specific case where the
+            # Pinot side genuinely cannot replay the aggregation (the
+            # generic ROLLUP_SEMANTIC_MISMATCH covers the broader
+            # semantics gap; this one is the actionable "your numbers
+            # WILL be wrong unless you do one of these three things"
+            # warning).
+            if (
+                canonical.source_kind == "batch"
+                and len(canonical.metrics) > 0
+            ):
+                risks.append(
+                    RiskAnnotation(
+                        risk_id=BATCH_AGGREGATION_NOT_REPLAYED,
+                        severity=RiskSeverity.HIGH.value,
+                        confidence=RiskConfidence.CERTAIN.value,
+                        description=RISK_DESCRIPTIONS[BATCH_AGGREGATION_NOT_REPLAYED],
+                        evidence=[
+                            f"source_kind=batch",
+                            f"rollup=True",
+                            f"{len(canonical.metrics)} metric(s) declared",
+                        ],
+                        remediation=(
+                            "Pre-aggregate upstream (Spark / Trino / a Druid MSQ "
+                            "into a separate output location), OR add a star-tree "
+                            "index to the generated table config (run "
+                            "``dpm recommend <spec>`` for the suggested "
+                            "starTreeIndexConfigs), OR accept query-time aggregation."
+                        ),
+                    )
+                )
 
         # ------------------------------------------------------------------ #
         # APPROX_AGGREGATOR_MISMATCH (BLOCKING)

@@ -15,6 +15,7 @@ PARTITIONING_CONFIG_REQUIRED = "PARTITIONING_CONFIG_REQUIRED"
 FLATTEN_SPEC_NOT_PORTABLE = "FLATTEN_SPEC_NOT_PORTABLE"
 CUSTOM_TIMESTAMP_FORMAT = "CUSTOM_TIMESTAMP_FORMAT"
 STREAM_SOURCE_MISMATCH = "STREAM_SOURCE_MISMATCH"
+BATCH_AGGREGATION_NOT_REPLAYED = "BATCH_AGGREGATION_NOT_REPLAYED"
 
 RISK_DESCRIPTIONS: dict[str, str] = {
     ROLLUP_SEMANTIC_MISMATCH: (
@@ -96,5 +97,15 @@ RISK_DESCRIPTIONS: dict[str, str] = {
         "The source datasource uses Kinesis as the streaming source. The generated Pinot "
         "REALTIME table config uses Kafka defaults. Update streamConfigs to point to the "
         "correct Kinesis endpoint and credentials, or set up a Kinesis-to-Kafka bridge."
+    ),
+    BATCH_AGGREGATION_NOT_REPLAYED: (
+        "Druid roll-up pre-aggregates rows at ingest time (TIME_FLOOR + GROUP BY in MSQ, "
+        "or rollup=true with metricsSpec in the classic spec). Pinot's batch ingestion is "
+        "row-oriented — it reads source records via a RecordReader but does NOT execute "
+        "GROUP BY or any other SQL operator. Three options for the operator: "
+        "(a) pre-aggregate upstream and feed the rolled-up output to Pinot; "
+        "(b) ingest raw rows + configure star-tree to pre-aggregate the same SUM/COUNT/MIN/MAX "
+        "combinations at segment-build time (``dpm recommend`` suggests this); "
+        "(c) ingest raw rows and rely on query-time aggregation (slower but simplest)."
     ),
 }
