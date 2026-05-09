@@ -186,6 +186,32 @@ def command(
             "Default 0 = run immediately."
         ),
     ),
+    check_columns: bool = typer.Option(
+        False, "--check-columns",
+        help=(
+            "Also run a column-presence check: for every column the "
+            "canonical model declares (dims + metrics + time field), "
+            "compare null-rates between Druid and Pinot. Catches "
+            "type-mapping accidents (STRING→LONG that turns text into "
+            "NULL), missing-column failures (Pinot rejects the query), "
+            "and broken ingestion transforms. Aggregate value parity "
+            "is intentionally NOT checked here — operator-supplied "
+            "aggregation logic is too varied to lock in. Requires "
+            "--from-canonical so the column list is known."
+        ),
+    ),
+    null_rate_tolerance: float = typer.Option(
+        0.10, "--null-rate-tolerance",
+        help=(
+            "Maximum allowed gap (Pinot null-rate − Druid null-rate) "
+            "before --check-columns flags a column as divergent. "
+            "Default 0.10 (10pp) is loose since Druid and Pinot don't "
+            "agree on null semantics for empty strings vs missing "
+            "fields. Tighten to e.g. 0.02 once you've manually triaged "
+            "the noisy columns."
+        ),
+        min=0.0, max=1.0,
+    ),
     druid_auth: str | None = typer.Option(
         None,
         "--druid-auth",
@@ -285,6 +311,8 @@ def command(
         raise typer.Exit(code=2)
 
     parity_queries: list[ParityQuery]
+    canonical = None  # Populated when --from-canonical is given;
+    # also required by --check-columns.
     if queries is not None:
         try:
             spec = load_queries(queries)
@@ -305,6 +333,14 @@ def command(
             canonical, pinot_table=pinot_table,
         )
 
+    if check_columns and canonical is None:
+        typer.echo(
+            "--check-columns requires --from-canonical so the column "
+            "list is known. Re-run with --from-canonical <spec.json>.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     druid_client = DruidHttpSqlClient(druid_url, session=druid_session)
     pinot_client = PinotHttpSqlClient(pinot_broker, session=pinot_session)
 
@@ -314,6 +350,20 @@ def command(
         )
 
     results = run_parity(parity_queries, druid=druid_client, pinot=pinot_client)
+
+    # Append column-presence checks to the same results list — they're
+    # ParityResult-shaped so the existing pretty + JSON renderers
+    # handle them without changes.
+    if check_columns and canonical is not None:
+        from migrator.parity.column_presence import run_column_presence
+        column_results = run_column_presence(
+            canonical,
+            druid_client=druid_client,
+            pinot_client=pinot_client,
+            pinot_table=pinot_table or canonical.datasource_name,
+            null_rate_tolerance=null_rate_tolerance,
+        )
+        results = list(results) + list(column_results)
 
     if json_output:
         _print_json(results)
