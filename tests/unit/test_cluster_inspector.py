@@ -443,9 +443,13 @@ class TestMarkdownRender:
         assert "GREEN" in md and "RED" in md
         # Both datasources rendered.
         assert "events" in md and "legacy" in md
-        # Worst-status DS rendered first (RED ahead of GREEN).
-        red_pos = md.index("legacy")
-        green_pos = md.index("events")
+        # In the per-datasource detail table the worst-status DS
+        # is rendered first (RED ahead of GREEN). Anchor at the
+        # section header so the wave-plan section above (which lists
+        # GREEN datasources first) doesn't confuse the assertion.
+        detail_section = md[md.index("## Per-datasource detail"):]
+        red_pos = detail_section.index("legacy")
+        green_pos = detail_section.index("events")
         assert red_pos < green_pos
 
     def test_renders_top_issues_section(self):
