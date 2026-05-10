@@ -908,24 +908,22 @@ class TestKinesisStream:
         result = normalize_spec(spec)
         assert result.canonical.source_kind == "stream"
 
-    def test_stream_source_mismatch_risk_detected(self, tmp_path):
+    def test_no_stream_source_mismatch_risk(self, tmp_path):
+        # v0.13.0: dpm now emits a proper KinesisConsumerFactory streamConfigs
+        # block, so the legacy STREAM_SOURCE_MISMATCH risk no longer fires.
         bundle("kinesis_stream", tmp_path)
         risks = load_json(tmp_path / "reports" / "risks.json")["risks"]
         risk_ids = [r["risk_id"] for r in risks]
-        assert "STREAM_SOURCE_MISMATCH" in risk_ids
+        assert "STREAM_SOURCE_MISMATCH" not in risk_ids
 
-    def test_stream_source_mismatch_risk_is_high(self, tmp_path):
+    def test_realtime_streamconfigs_targets_kinesis_factory(self, tmp_path):
         bundle("kinesis_stream", tmp_path)
-        risks = load_json(tmp_path / "reports" / "risks.json")["risks"]
-        risk = next(r for r in risks if r["risk_id"] == "STREAM_SOURCE_MISMATCH")
-        assert risk["severity"] == "high"
-
-    def test_stream_source_mismatch_evidence_mentions_kinesis(self, tmp_path):
-        bundle("kinesis_stream", tmp_path)
-        risks = load_json(tmp_path / "reports" / "risks.json")["risks"]
-        risk = next(r for r in risks if r["risk_id"] == "STREAM_SOURCE_MISMATCH")
-        evidence_text = " ".join(risk["evidence"])
-        assert "kinesis" in evidence_text.lower()
+        table = load_json(tmp_path / "table-realtime.json")
+        sc = table["tableIndexConfig"]["streamConfigs"]
+        assert sc["streamType"] == "kinesis"
+        assert sc["stream.kinesis.consumer.factory.class.name"].endswith(
+            "KinesisConsumerFactory"
+        )
 
     def test_realtime_table_has_stream_configs(self, tmp_path):
         bundle("kinesis_stream", tmp_path)

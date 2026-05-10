@@ -14,7 +14,6 @@ RETENTION_GRANULARITY_MISMATCH = "RETENTION_GRANULARITY_MISMATCH"
 PARTITIONING_CONFIG_REQUIRED = "PARTITIONING_CONFIG_REQUIRED"
 FLATTEN_SPEC_NOT_PORTABLE = "FLATTEN_SPEC_NOT_PORTABLE"
 CUSTOM_TIMESTAMP_FORMAT = "CUSTOM_TIMESTAMP_FORMAT"
-STREAM_SOURCE_MISMATCH = "STREAM_SOURCE_MISMATCH"
 BATCH_AGGREGATION_NOT_REPLAYED = "BATCH_AGGREGATION_NOT_REPLAYED"
 
 RISK_DESCRIPTIONS: dict[str, str] = {
@@ -92,11 +91,6 @@ RISK_DESCRIPTIONS: dict[str, str] = {
         "The generated Pinot dateTimeFieldSpec uses a best-effort mapping; verify that "
         "the format pattern is valid in Pinot's SIMPLE_DATE_FORMAT and produces correct "
         "epoch millisecond values."
-    ),
-    STREAM_SOURCE_MISMATCH: (
-        "The source datasource uses Kinesis as the streaming source. The generated Pinot "
-        "REALTIME table config uses Kafka defaults. Update streamConfigs to point to the "
-        "correct Kinesis endpoint and credentials, or set up a Kinesis-to-Kafka bridge."
     ),
     BATCH_AGGREGATION_NOT_REPLAYED: (
         "Druid roll-up pre-aggregates rows at ingest time (TIME_FLOOR + GROUP BY in MSQ, "

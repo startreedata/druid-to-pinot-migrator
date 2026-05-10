@@ -135,21 +135,6 @@ See [Tutorial 10 — Nested JSON](10-nested-json.md).
 
 ---
 
-### STREAM_SOURCE_MISMATCH — HIGH
-
-**Trigger:** `ioConfig.type: "kinesis"`.
-
-**Why it's high:** The generated REALTIME table config uses Kafka defaults. Deploying it
-as-is will result in a table that cannot consume from Kinesis.
-
-**What to do:**
-1. Replace the generated Kafka `streamConfigs` with Pinot's Kinesis consumer settings.
-2. Or set up a Kinesis-to-Kafka bridge and use the Kafka config as-is.
-
-See [Tutorial 05 — Kinesis Streaming](05-kinesis-streaming.md).
-
----
-
 ### TRANSFORM_PORTABILITY_RISK — MEDIUM
 
 **Trigger:** One or more transforms in `transformSpec` use non-trivial expressions

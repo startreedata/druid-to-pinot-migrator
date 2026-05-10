@@ -1,24 +1,23 @@
 # Tutorial 05 — Migrating a Kinesis Streaming Table
 
-**Pattern:** `kinesis` ioConfig  
-**Pinot table type:** REALTIME  
-**Risk:** `STREAM_SOURCE_MISMATCH` (HIGH)  
+**Pattern:** `kinesis` ioConfig
+**Pinot table type:** REALTIME
+**Risks:** none specific to Kinesis (general streaming risks may still fire)
 **Typical use cases:** AWS-native real-time pipelines, payment events, IoT streams on AWS
 
 ---
 
-## The Problem
+## The Pattern
 
-Druid supports Kinesis natively via the Kinesis indexing service. Pinot does not have a
-built-in Kinesis consumer in most deployments. The tool generates a **Kafka-based REALTIME
-config** as a best-effort scaffold, and raises `STREAM_SOURCE_MISMATCH` (HIGH severity)
-to flag that manual work is required.
+Druid's Kinesis indexing service has a direct counterpart in Pinot:
+[`KinesisConsumerFactory`](https://github.com/apache/pinot/tree/master/pinot-plugins/pinot-stream-ingestion/pinot-kinesis),
+which ships in every Pinot 1.x distribution under the
+`pinot-kinesis` plugin and is enabled by default.
 
-You have two options:
-1. **Kinesis-to-Kafka bridge** — Route Kinesis events into Kafka using Kafka MirrorMaker 2,
-   Kafka Connect (Kinesis Source Connector), or AWS MSK.
-2. **Pinot Kinesis plugin** — Use the `pinot-kinesis` plugin (available but not default in
-   all Pinot distributions).
+`dpm` emits a complete `streamConfigs` block targeting that plugin. There is
+no manual stream-config rewrite required to deploy — only AWS credentials, which
+should be supplied via IAM instance profiles or environment variables on the
+Pinot servers (deliberately **not** committed to the table config).
 
 ---
 
@@ -72,20 +71,9 @@ You have two options:
 dpm generate payment_events_kinesis.json --out ./output/payment_events
 ```
 
-You will see a high-severity risk:
-
-```
-Risks detected: 1
-  [HIGH] STREAM_SOURCE_MISMATCH
-    The source datasource uses Kinesis as the streaming source. The generated
-    Pinot REALTIME table config uses Kafka defaults.
-    Evidence: ioConfig.type=kinesis; REALTIME table generated with Kafka defaults
-    Remediation: Replace streamConfigs with Kinesis consumer factory settings or
-    bridge Kinesis to Kafka before Pinot ingestion.
-```
-
-A REALTIME table config and stream-config.json are still generated — they are usable
-as templates but require manual stream configuration.
+No HIGH-severity risk fires for the Kinesis source itself. The generated
+`table-realtime.json` is deploy-ready once AWS credentials are in place on
+the Pinot side.
 
 ---
 
@@ -120,112 +108,73 @@ as templates but require manual stream configuration.
 }
 ```
 
-### table-realtime.json (streamConfigs section — needs update)
-
-The generated streamConfigs uses Kafka as a placeholder. You **must** replace this:
-
-```json
-"streamConfigs": {
-  "streamType": "kafka",
-  "stream.kafka.topic.name": "payment-events-prod",
-  "stream.kafka.broker.list": "localhost:9092",
-  ...
-}
-```
-
----
-
-## Option A: Kinesis-to-Kafka Bridge
-
-This approach reuses the generated Kafka config with no Pinot plugin changes.
-
-### Using Kafka Connect (Kinesis Source Connector)
-
-```json
-{
-  "name": "kinesis-payment-events-source",
-  "config": {
-    "connector.class": "io.confluent.connect.aws.kinesis.KinesisSourceConnector",
-    "tasks.max": "2",
-    "kinesis.stream.name": "payment-events-prod",
-    "kinesis.region": "us-east-1",
-    "kafka.topic": "payment-events-pinot",
-    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": "false"
-  }
-}
-```
-
-Then update `stream.kafka.topic.name` in the generated table config to `payment-events-pinot`.
-
-### Using Amazon MSK Connect
-
-```bash
-aws kafkaconnect create-connector \
-  --connector-configuration file://connector-config.json \
-  --connector-name kinesis-payment-bridge \
-  ...
-```
-
----
-
-## Option B: Pinot Kinesis Plugin
-
-If your Pinot cluster includes the `pinot-kinesis` plugin, update the streamConfigs:
+### table-realtime.json — `streamConfigs` block
 
 ```json
 "streamConfigs": {
   "streamType": "kinesis",
   "stream.kinesis.topic.name": "payment-events-prod",
-  "stream.kinesis.region": "us-east-1",
+  "stream.kinesis.consumer.type": "lowlevel",
   "stream.kinesis.consumer.factory.class.name":
     "org.apache.pinot.plugin.stream.kinesis.KinesisConsumerFactory",
   "stream.kinesis.decoder.class.name":
     "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder",
-  "stream.kinesis.shard.iterator.type": "LATEST",
-  "realtime.segment.flush.threshold.rows": "100000",
+  "stream.kinesis.consumer.prop.auto.offset.reset": "largest",
+  "stream.kinesis.endpoint": "kinesis.us-east-1.amazonaws.com",
+  "region": "us-east-1",
+  "realtime.segment.flush.threshold.rows": "1000000",
   "realtime.segment.flush.threshold.time": "1h"
 }
 ```
 
-For IAM authentication:
+Notes:
 
-```json
-"stream.kinesis.consumer.prop.aws.accessKeyId": "AKIAIOSFODNN7EXAMPLE",
-"stream.kinesis.consumer.prop.aws.secretKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-```
-
-Or, if running on EC2/ECS with an IAM role, leave these out — the SDK will use the
-instance/task role automatically.
+- **`region`** — auto-extracted from the Druid `endpoint` when it follows
+  the canonical `kinesis.<region>.amazonaws.com` form. For non-AWS endpoints
+  (kinesalite, custom proxies) the field is left blank and **must** be set
+  manually before deploy — Pinot's Kinesis plugin requires it.
+- **`stream.kinesis.endpoint`** — only emitted when the Druid spec has an
+  explicit endpoint. For real AWS deployments where the SDK can resolve the
+  region by itself you can drop this field.
+- **`auto.offset.reset`** — derived from `useEarliestSequenceNumber`:
+  `false` ⇒ `largest` (Kinesis `LATEST`), `true` ⇒ `smallest` (Kinesis
+  `TRIM_HORIZON`). When this table is the OFFLINE-side of a hybrid
+  migration, the planner overrides this with the watermark ISO timestamp.
+- **AWS credentials are deliberately omitted.** Production Pinot deployments
+  source them from IAM instance profiles (EKS / ECS / EC2 task roles) or the
+  standard AWS env vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_SESSION_TOKEN`). Putting them in the table config commits a secret to
+  source control.
 
 ---
 
-## Kinesis-Specific Ingestion Parameters
+## Druid → Pinot Kinesis-config Mapping
 
-Map Druid Kinesis supervisor settings to Pinot equivalents:
-
-| Druid `ioConfig` | Pinot streamConfig equivalent |
-|-----------------|-------------------------------|
-| `taskCount: 2` | `tasks.max` in connector / consumer thread count |
-| `replicas: 1` | `replicasPerPartition` in segmentsConfig |
+| Druid `ioConfig` | Pinot streamConfig (auto-emitted) |
+|------------------|-----------------------------------|
+| `stream: "payment-events-prod"` | `stream.kinesis.topic.name: "payment-events-prod"` |
+| `endpoint: "kinesis.us-east-1.amazonaws.com"` | `stream.kinesis.endpoint: "..."` + `region: "us-east-1"` |
+| `useEarliestSequenceNumber: false` | `stream.kinesis.consumer.prop.auto.offset.reset: "largest"` |
+| `useEarliestSequenceNumber: true` | `stream.kinesis.consumer.prop.auto.offset.reset: "smallest"` |
 | `taskDuration: "PT1H"` | `realtime.segment.flush.threshold.time: "1h"` |
-| `useEarliestSequenceNumber: false` | `stream.kinesis.shard.iterator.type: "LATEST"` |
-| `useEarliestSequenceNumber: true` | `stream.kinesis.shard.iterator.type: "TRIM_HORIZON"` |
+| `replicas: 1` | `replicasPerPartition` in segmentsConfig |
 
 ---
 
 ## Sequence Number vs. Offset
 
-Kinesis uses **sequence numbers** (per-shard monotonic strings) rather than Kafka-style
-integer offsets. Pinot's Kinesis plugin tracks these automatically. If you're using a
-Kafka bridge, the Kafka connector handles the offset bookkeeping — you just interact with
-Kafka offsets on the Pinot side.
+Kinesis uses **sequence numbers** (per-shard monotonic strings) rather than
+Kafka-style integer offsets. The Pinot Kinesis plugin tracks these
+automatically per shard, and exposes them through Pinot's segment metadata
+the same way Kafka offsets are exposed for Kafka tables.
+
+For hybrid (OFFLINE + REALTIME) migrations, the watermark snapshot still
+captures a UTC ISO timestamp — Pinot's Kinesis plugin honours
+`auto.offset.reset` set to a timestamp, just like Kafka.
 
 ---
 
 ## Deploying
-
-After updating the streamConfigs:
 
 ```bash
 # Create schema
@@ -233,17 +182,24 @@ curl -X POST http://pinot-controller:9000/schemas \
   -H "Content-Type: application/json" \
   -d @output/payment_events/schema.json
 
-# Create REALTIME table (with updated stream config)
+# Create REALTIME table
 curl -X POST http://pinot-controller:9000/tables \
   -H "Content-Type: application/json" \
   -d @output/payment_events/table-realtime.json
 ```
 
+Pinot servers must have AWS credentials available at process start (IAM
+role on the host, or env vars on the container). If the table goes ERROR
+shortly after creation with `kinesis.AmazonClientException: Unable to load
+AWS credentials`, the credential chain is the cause — table config does not
+need to change.
+
 ---
 
 ## Query Translation
 
-Queries are identical to the Kafka streaming pattern:
+Queries are identical to the Kafka streaming pattern; the streamType is an
+ingestion-side concern, not a query-side one.
 
 ```sql
 -- Druid:
@@ -263,5 +219,5 @@ GROUP BY status
 
 ## See Also
 
-- [Tutorial 04 — Kafka Streaming](04-kafka-streaming.md) — full streaming table walkthrough
-- [Tutorial 16 — Risks and Confidence Scores](16-risks-and-confidence.md) — STREAM_SOURCE_MISMATCH explanation
+- [Tutorial 04 — Kafka Streaming](04-kafka-streaming.md) — Kafka equivalent
+- [Reference — Risks](reference/risks.md) — full risk taxonomy
