@@ -167,6 +167,28 @@ def command(
         for issue, count in top:
             _console.print(f"  [red]{count:>3d}×[/red] {issue}")
 
+    if report.datasources:
+        # Local import to avoid the wave_planner ↔ inspector cycle
+        # at module-load time.
+        from migrator.cluster.wave_planner import (
+            WAVE_1, WAVE_2, WAVE_3, WAVE_QUARANTINE, WAVE_TRIAGE,
+            plan_waves,
+        )
+        plan = plan_waves(report)
+        _console.print("")
+        _console.print("[bold]Proposed migration waves[/bold]")
+        for wave_id, wave_color in (
+            (WAVE_1, "green"),
+            (WAVE_2, "yellow"),
+            (WAVE_3, "red"),
+            (WAVE_QUARANTINE, "magenta"),
+            (WAVE_TRIAGE, "white"),
+        ):
+            b = plan.get(wave_id)
+            _console.print(
+                f"  [{wave_color}]{b.title}[/{wave_color}] — {b.count}"
+            )
+
     _console.print("")
     _console.print(f"Report: {paths['markdown']}")
     _console.print(f"        {paths['summary']}")

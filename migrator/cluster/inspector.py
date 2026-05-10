@@ -131,6 +131,9 @@ class ClusterReport:
         return c.most_common(n)
 
     def to_dict(self) -> dict[str, Any]:
+        # Local import: wave_planner imports from this module, so the
+        # top-level import would be circular.
+        from migrator.cluster.wave_planner import plan_waves
         return {
             "coordinator_url": self.coordinator_url,
             "overlord_url": self.overlord_url,
@@ -142,6 +145,7 @@ class ClusterReport:
             "top_blocking_issues": [
                 {"issue": k, "count": v} for k, v in self.top_blocking_issues()
             ],
+            "wave_plan": plan_waves(self).to_dict(),
             "datasources": [d.to_dict() for d in self.datasources],
         }
 
@@ -328,6 +332,8 @@ def inspect_cluster(
 def render_markdown(report: ClusterReport) -> str:
     """Pretty markdown summary suitable for an internal
     migration-readiness review document."""
+    # Local import: wave_planner imports from this module.
+    from migrator.cluster.wave_planner import plan_waves, render_wave_plan_markdown
     lines: list[str] = []
     lines.append("# Druid → Pinot Cluster Compatibility Report")
     lines.append("")
@@ -363,6 +369,14 @@ def render_markdown(report: ClusterReport) -> str:
         ):
             lines.append(f"| `{cls}` | {n} |")
         lines.append("")
+
+    # Wave plan goes ABOVE the top-blocking-issues table because the
+    # waves are the actionable artifact (what to migrate next) — the
+    # top-issues table is supporting context for *why* certain waves
+    # are heavy. Operators have told us they read the report from the
+    # top.
+    if report.datasources:
+        lines.append(render_wave_plan_markdown(plan_waves(report)))
 
     top = report.top_blocking_issues(20)
     if top:
