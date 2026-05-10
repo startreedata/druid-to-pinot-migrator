@@ -72,7 +72,6 @@ Multi-value dimensions (any type with `multiValueHandling` set) receive
 | Condition | Source kind |
 |-----------|------------|
 | `ioConfig.type` contains `kafka` or `kinesis` | `stream` |
-| `ioConfig.type` is `kinesis` | `stream` + STREAM_SOURCE_MISMATCH risk |
 | All other ioConfig types | `batch` |
 
 ---

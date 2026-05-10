@@ -12,7 +12,6 @@ All risk IDs, severity levels, triggers, and remediations in one place.
 | `ROLLUP_SEMANTIC_MISMATCH` | high | certain | -0.15 | [Tutorial 03](../03-rolled-up-metrics.md) |
 | `UNSUPPORTED_COMPLEX_FIELD` | high | certain | -0.15 | [Tutorial 12](../12-sketch-aggregators.md) |
 | `FLATTEN_SPEC_NOT_PORTABLE` | high | certain | -0.15 | [Tutorial 10](../10-nested-json.md) |
-| `STREAM_SOURCE_MISMATCH` | high | certain | -0.15 | [Tutorial 05](../05-kinesis-streaming.md) |
 | `TRANSFORM_PORTABILITY_RISK` | medium | likely | -0.05 | [Tutorial 09](../09-transforms.md) |
 | `MULTIVALUE_AMBIGUITY` | medium | likely | -0.05 | [Tutorial 08](../08-multivalue-dimensions.md) |
 | `PARTITIONING_CONFIG_REQUIRED` | medium | certain | -0.05 | [Tutorial 13](../13-partitioned-tables.md) |
@@ -125,28 +124,6 @@ will not be available as columns.
 1. Pre-flatten the JSON upstream in your ETL pipeline.
 2. Or configure Pinot ingestion `transformFunctionSpec` with `jsonPath()` function.
 3. `jq`-style transforms must be implemented upstream.
-
----
-
-## STREAM_SOURCE_MISMATCH
-
-**Severity:** HIGH  
-**Confidence:** CERTAIN  
-**Score penalty:** -0.15  
-
-**What triggers it:**  
-`ioConfig.type: "kinesis"` (detected directly or via `ioConfig.stream` field).
-
-**Why it matters:**  
-The generated REALTIME table config uses Kafka defaults. Deploying without modification
-will create a table that cannot consume from Kinesis.
-
-**Evidence format:**  
-`ioConfig.type=kinesis; REALTIME table generated with Kafka defaults`
-
-**Remediation:**  
-1. Replace Kafka streamConfigs with Pinot Kinesis consumer settings.
-2. Or set up a Kinesis-to-Kafka bridge and update the Kafka broker/topic config.
 
 ---
 

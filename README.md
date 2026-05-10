@@ -63,7 +63,7 @@ Legend:
 |---------------|----------------------------------------|--------------|
 | `index_parallel` (batch) | `OFFLINE` table + `batch-job.json` | — |
 | `kafka` ioConfig | `REALTIME` table + Kafka `streamConfigs` | — |
-| `kinesis` ioConfig | `REALTIME` table + Kafka defaults | `STREAM_SOURCE_MISMATCH` (HIGH) |
+| `kinesis` ioConfig | `REALTIME` table + Kinesis `streamConfigs` (region auto-extracted) | — |
 | `rollup: true` + additive metrics | `OFFLINE` table | `ROLLUP_SEMANTIC_MISMATCH` (HIGH) |
 | `count`, `longSum`, `doubleSum`, min/max | Pinot SUM / MIN / MAX columns | — |
 | Sketch metrics (`thetaSketch`, `HLL*`, `hyperUnique`, …) | `BYTES` column | `APPROX_AGGREGATOR_MISMATCH` (BLOCKING) |

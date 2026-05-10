@@ -153,9 +153,10 @@ def _from_supervisor(
     iocfg = inner_spec.get("ioConfig") or {}
     if sup_type == "kinesis":
         warnings.append(
-            "Kinesis supervisor extracted; the migrator currently emits a "
-            "Kafka REALTIME table by default (STREAM_SOURCE_MISMATCH risk). "
-            "Review the generated artifacts."
+            "Kinesis supervisor extracted; dpm emits a Pinot KinesisConsumerFactory "
+            "stream config. Review streamConfigs.region (auto-extracted from the "
+            "Druid endpoint when it follows kinesis.<region>.amazonaws.com) and "
+            "supply AWS credentials via IAM / env vars in the Pinot deployment."
         )
     cp = iocfg.get("consumerProperties") or {}
     if cp.get("bootstrap.servers", "").startswith("localhost"):

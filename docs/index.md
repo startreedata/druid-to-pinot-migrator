@@ -29,7 +29,7 @@ If you hit a risk or warning during migration, consult the
 | 02 | [Migrating a Raw Event Table](02-raw-event-table.md) | `index_parallel`, no rollup | OFFLINE table, batch ingestion |
 | 03 | [Migrating a Rolled-Up Metrics Table](03-rolled-up-metrics.md) | rollup=true, SUM/COUNT | ROLLED_UP_ADDITIVE, semantic differences |
 | 04 | [Migrating a Kafka Streaming Table](04-kafka-streaming.md) | `kafka` ioConfig | REALTIME table, stream configs |
-| 05 | [Migrating a Kinesis Streaming Table](05-kinesis-streaming.md) | `kinesis` ioConfig | STREAM_SOURCE_MISMATCH risk |
+| 05 | [Migrating a Kinesis Streaming Table](05-kinesis-streaming.md) | `kinesis` ioConfig | REALTIME table, KinesisConsumerFactory streamConfigs |
 | 06 | [Typed Dimensions: Long, Float, Double](06-typed-dimensions.md) | Typed dimensionsSpec | Type mapping, precision considerations |
 | 07 | [Min/Max Metrics](07-minmax-metrics.md) | doubleMin/Max, longMin/Max | MIN/MAX aggregations, rollup with range stats |
 | 08 | [Multi-Value Dimensions](08-multivalue-dimensions.md) | `multiValueHandling` | MV columns in Pinot, query caveats |

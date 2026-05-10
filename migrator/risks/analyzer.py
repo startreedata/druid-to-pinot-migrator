@@ -18,7 +18,6 @@ from migrator.risks.taxonomy import (
     RISK_DESCRIPTIONS,
     BATCH_AGGREGATION_NOT_REPLAYED,
     ROLLUP_SEMANTIC_MISMATCH,
-    STREAM_SOURCE_MISMATCH,
     TIME_SEMANTICS_MISMATCH,
     TRANSFORM_PORTABILITY_RISK,
     UNSUPPORTED_COMPLEX_FIELD,
@@ -277,25 +276,6 @@ class RiskAnalyzer:
                     remediation=(
                         "Update the dateTimeFieldSpec.format in schema.json to use "
                         "the correct Pinot SIMPLE_DATE_FORMAT pattern."
-                    ),
-                )
-            )
-
-        # ------------------------------------------------------------------ #
-        # STREAM_SOURCE_MISMATCH — Kinesis source generating Kafka config
-        # ------------------------------------------------------------------ #
-        io_type = (canonical.raw_io_config.get("type") or "").lower()
-        if io_type == "kinesis":
-            risks.append(
-                RiskAnnotation(
-                    risk_id=STREAM_SOURCE_MISMATCH,
-                    severity=RiskSeverity.HIGH.value,
-                    confidence=RiskConfidence.CERTAIN.value,
-                    description=RISK_DESCRIPTIONS[STREAM_SOURCE_MISMATCH],
-                    evidence=["ioConfig.type=kinesis; REALTIME table generated with Kafka defaults"],
-                    remediation=(
-                        "Replace streamConfigs with Kinesis consumer factory settings or "
-                        "bridge Kinesis to Kafka before Pinot ingestion."
                     ),
                 )
             )

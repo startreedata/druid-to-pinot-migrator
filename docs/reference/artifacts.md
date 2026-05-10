@@ -263,8 +263,11 @@ Kafka consumer configuration nested inside `tableIndexConfig`.
 | `realtime.segment.flush.threshold.rows` | — | `"1000000"` |
 | `realtime.segment.flush.threshold.time` | — | `"1h"` |
 
-> **Note:** For Kinesis sources, the tool still generates Kafka defaults and raises a
-> `STREAM_SOURCE_MISMATCH` risk. Update `streamConfigs` manually before deployment.
+> **Note:** For Kinesis sources, the tool emits a `streamType: "kinesis"` block targeting
+> Pinot's `KinesisConsumerFactory` plugin, with `region` auto-extracted from the Druid
+> endpoint when it follows `kinesis.<region>.amazonaws.com`. AWS credentials must be
+> supplied via IAM roles or env vars on the Pinot servers — they are deliberately not
+> written into the table config. See [Tutorial 05](../05-kinesis-streaming.md).
 
 ### Complete example
 
