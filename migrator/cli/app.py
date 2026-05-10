@@ -17,6 +17,7 @@ from migrator.cli.commands import (
     normalize,
     parity_check,
     plan_hybrid,
+    query_report,
     recommend,
     translate_lookups,
     validate,
@@ -32,6 +33,8 @@ app.command("validate")(validate.command)
 app.command("extract-spec")(extract_spec.command)
 # Whole-cluster compatibility report
 app.command("cluster-report")(cluster_report.command)
+# Query corpus compatibility report
+app.command("query-report")(query_report.command)
 # Hybrid (REALTIME + OFFLINE) migration commands
 app.command("extract-offsets")(extract_offsets.command)
 app.command("plan-hybrid")(plan_hybrid.command)
