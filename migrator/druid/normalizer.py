@@ -338,18 +338,26 @@ class DruidNormalizer:
         input_source_type = (parsed.io_config.inputSource or {}).get("type", "")
         if input_source_type == "google":
             warnings.append(
-                "GCS (google) inputSource detected; "
-                "Pinot batch job config requires GCS URI and appropriate auth"
+                "GCS (google) inputSource detected; the generated batch job "
+                "wires the GcsPinotFS plugin with a placeholder "
+                "pinotFSSpecs.configs.projectId — set your GCP projectId "
+                "(credentials come from the Pinot server's service account / "
+                "workload identity, not the job spec)"
             )
         elif input_source_type == "azure":
             warnings.append(
-                "Azure inputSource detected; "
-                "Pinot batch job config requires Azure blob storage URI and auth"
+                "Azure inputSource detected; the generated batch job wires "
+                "the adl2 / ADLSGen2PinotFS plugin with a placeholder "
+                "pinotFSSpecs.configs.accountName and rewrites the URI to "
+                "adl2:// — set your storage account and verify the URI "
+                "(access key / SAS comes from the Pinot server env, not the "
+                "job spec)"
             )
         elif input_source_type == "http":
             warnings.append(
-                "HTTP inputSource detected; "
-                "Pinot batch job supports HTTP input via the HTTP pinotFS plugin"
+                "HTTP inputSource detected; Pinot has no HTTP PinotFS plugin — "
+                "stage the files to object storage (S3 / GCS / ADLS) or "
+                "download them locally before running the batch ingestion job"
             )
 
         # ------------------------------------------------------------------
