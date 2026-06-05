@@ -338,7 +338,8 @@ Pinot batch ingestion job spec. Used with `pinot-admin.sh LaunchDataIngestionJob
 
 ### pinotFSSpecs
 
-Array of filesystem plugin configurations. The default spec configures the local filesystem:
+Array of filesystem plugin configurations, selected automatically from the Druid
+`inputSource` scheme. Local sources get the bare local-filesystem spec:
 
 ```json
 [
@@ -349,7 +350,19 @@ Array of filesystem plugin configurations. The default spec configures the local
 ]
 ```
 
-For cloud storage, add additional specs. See [Tutorial 15 — Cloud Storage](../15-cloud-storage.md).
+For object-store sources the tool wires the right plugin **and** a `configs` block
+with the structural keys Pinot needs (derived from the spec where present, else a
+`REPLACE_WITH_*` placeholder). Credentials are never written into the spec:
+
+| Druid scheme | `scheme` | `className` | `configs` keys |
+|--------------|----------|-------------|----------------|
+| `s3://` | `s3` | `S3PinotFS` | `region` |
+| `gs://` | `gs` | `GcsPinotFS` | `projectId` |
+| `azure://` (rewritten to `adl2://`) | `adl2` | `ADLSGen2PinotFS` | `accountName`, `fileSystemName` |
+| `hdfs://` | `hdfs` | `HadoopPinotFS` | — |
+
+HTTP sources have no Pinot filesystem and are not auto-wired. See
+[Tutorial 15 — Cloud Storage](../15-cloud-storage.md).
 
 ### recordReaderSpec
 

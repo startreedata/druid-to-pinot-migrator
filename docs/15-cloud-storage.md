@@ -1,6 +1,6 @@
 # Tutorial 15 — Cloud Storage Sources (GCS, Azure, HTTP)
 
-**Pattern:** `inputSource.type` of `google`, `azure`, or `http`  
+**Pattern:** `inputSource.type` of `s3`, `google`, `azure`, or `http`  
 **Risk:** Advisory warnings only (no risk IDs raised)  
 **Typical use cases:** cloud-native data lakes, multi-cloud architectures
 
@@ -9,17 +9,24 @@
 ## Overview
 
 Druid supports multiple cloud storage providers as input sources. Pinot also supports
-cloud storage but uses its own `PinotFS` plugin architecture. The tool detects
-non-S3 cloud sources and emits advisory warnings to remind you to configure Pinot
-appropriately.
+cloud storage but uses its own `PinotFS` plugin architecture. For S3, GCS, and Azure
+the tool now **generates the `pinotFSSpecs` block** in `batch-job.json` — the right
+plugin class, the right scheme, and a `configs` block with the structural keys Pinot
+needs. Values that live in the Druid spec are carried over; the rest are emitted as
+loud `REPLACE_WITH_*` placeholders, and a warning names exactly what to fill.
 
-| Druid `inputSource.type` | Tool warning | Pinot equivalent |
-|--------------------------|-------------|-----------------|
-| `s3` | None (handled natively) | `S3PinotFS` (default) |
-| `google` | GCS advisory | `GcsPinotFS` plugin |
-| `azure` | Azure advisory | `AzurePinotFS` plugin |
-| `http` | HTTP advisory | `HttpPinotFS` plugin |
-| `local` | None | Local file (dev/test only) |
+**Credentials are deliberately never written into the job spec.** Access keys, GCS
+service-account keys, and Azure SAS tokens come from the Pinot server's ambient
+environment (IAM instance role, GKE workload identity, env vars) — committing them
+to `batch-job.json` would leak a secret into source control.
+
+| Druid `inputSource.type` | Generated `pinotFSSpecs` | Pinot plugin (scheme) |
+|--------------------------|--------------------------|-----------------------|
+| `s3` | `configs.region` (derived or placeholder) | `S3PinotFS` (`s3`) |
+| `google` | `configs.projectId` (placeholder) | `GcsPinotFS` (`gs`) |
+| `azure` | `configs.accountName` + `fileSystemName`; URI rewritten to `adl2://` | `ADLSGen2PinotFS` (`adl2`) |
+| `http` | — (no Pinot HTTP filesystem; pre-stage required) | none |
+| `local` | — (no configs) | `LocalPinotFS` (`file`) |
 
 ---
 
@@ -72,16 +79,20 @@ dpm generate app_events_spec.json --out ./output/app_events
 
 ```
 Warnings:
-  - GCS (google) inputSource detected; Pinot batch job config requires GCS URI
-    and appropriate auth
+  - GCS (google) inputSource detected; the generated batch job wires the
+    GcsPinotFS plugin with a placeholder pinotFSSpecs.configs.projectId — set
+    your GCP projectId (credentials come from the Pinot server's service
+    account / workload identity, not the job spec)
 ```
 
-No risks are raised — this is a warning, not a risk. The migration proceeds and all
-artifacts are generated.
+No risks are raised — this is a warning, not a risk. The migration proceeds and the
+batch job is generated with the `GcsPinotFS` plugin already wired; you only need to
+replace the `projectId` placeholder.
 
 ### Configuring Pinot for GCS
 
-Pinot reads from GCS using the `GcsPinotFS` plugin. Configure it in the batch job spec:
+The generated batch job already wires the `GcsPinotFS` plugin. Replace the
+`REPLACE_WITH_GCP_PROJECT_ID` placeholder with your project:
 
 ```json
 {
@@ -148,50 +159,47 @@ and leave `gcpKey` absent.
 
 ### Configuring Pinot for Azure
 
+Pinot reads ADLS Gen2 storage via the `ADLSGen2PinotFS` plugin, which registers the
+`adl2` scheme. The tool **rewrites the Druid `azure://` URI to `adl2://`** (so a
+PinotFS claims it at deploy time) and derives `fileSystemName` from the container in
+the URI. The generated batch job looks like:
+
 ```json
 {
-  "inputDirURI": "adl://mycontainer/events/dt=2024-01-01/",
-  "outputDirURI": "adl://pinot-output/events/",
+  "inputDirURI": "adl2://mycontainer/events/dt=2024-01-01/",
+  "outputDirURI": "adl2://pinot-output/events/",
   "pinotFSSpecs": [
     {
-      "scheme": "adl",
-      "className": "org.apache.pinot.plugin.filesystem.AzurePinotFS",
+      "scheme": "adl2",
+      "className": "org.apache.pinot.plugin.filesystem.ADLSGen2PinotFS",
       "configs": {
-        "accountName": "mystorageaccount",
-        "accessKey": "${AZURE_STORAGE_ACCESS_KEY}"
+        "accountName": "REPLACE_WITH_AZURE_STORAGE_ACCOUNT",
+        "fileSystemName": "mycontainer"
       }
     }
   ]
 }
 ```
 
+Replace `accountName` with your storage account. The access key is **not** written
+into the spec — set it on the Pinot server via the `accessKey` config in
+`controller.conf` / `server.conf`, or supply it through the environment.
+
 ### Azure Authentication Options
 
+Set these on the **Pinot server** (not the generated job spec). The keys
+`ADLSGen2PinotFS` recognises:
+
 **Access key:**
-```json
-"configs": {
-  "accountName": "mystorageaccount",
-  "accessKey": "base64-encoded-key=="
-}
+```
+pinot.controller.storage.factory.adl2.accountName=mystorageaccount
+pinot.controller.storage.factory.adl2.accessKey=base64-encoded-key==
+pinot.controller.storage.factory.adl2.fileSystemName=mycontainer
 ```
 
-**SAS token:**
-```json
-"configs": {
-  "accountName": "mystorageaccount",
-  "sasToken": "?sv=2020-08-04&ss=b&srt=sco&sp=..."
-}
-```
-
-**Azure AD (service principal):**
-```json
-"configs": {
-  "accountName": "mystorageaccount",
-  "tenantId": "tenant-id",
-  "clientId": "app-id",
-  "clientSecret": "${AZURE_CLIENT_SECRET}"
-}
-```
+**Service principal (Azure AD):** configure `clientId` / `clientSecret` / `tenantId`
+on the server-side `adl2` storage factory. Keeping these out of the generated artifact
+avoids committing a credential to source control.
 
 ---
 
@@ -212,29 +220,22 @@ and leave `gcpKey` absent.
 
 ```
 Warnings:
-  - HTTP inputSource detected; Pinot batch job supports HTTP input via the
-    HTTP pinotFS plugin
+  - HTTP inputSource detected; Pinot has no HTTP PinotFS plugin — stage the
+    files to object storage (S3 / GCS / ADLS) or download them locally before
+    running the batch ingestion job
 ```
 
 ### Configuring Pinot for HTTP
 
-Pinot can read from HTTP URLs using its built-in HTTP support:
+**Pinot does not ship an HTTP `PinotFS` plugin.** Unlike S3 / GCS / ADLS, there is no
+filesystem class that reads `http(s)://` URLs during segment creation, so the tool
+does not generate a `pinotFSSpecs` entry for HTTP sources. Two options:
 
-```json
-{
-  "inputDirURI": "http://data-api.example.com/exports/",
-  "pinotFSSpecs": [
-    {
-      "scheme": "http",
-      "className": "org.apache.pinot.plugin.filesystem.HttpPinotFS"
-    }
-  ]
-}
-```
-
-For authenticated HTTP endpoints, pass auth headers through environment variables
-or Pinot's credentials configuration. Alternatively, download files locally before
-batch ingest.
+1. **Pre-stage to object storage** (recommended): copy the source files to an S3 /
+   GCS / ADLS bucket, then point the batch job at that bucket — which the tool fully
+   supports. This keeps the ingestion reproducible.
+2. **Download locally first**: pull the files to a local directory and run the batch
+   job against `file://` paths (dev / one-shot migrations only).
 
 ---
 
