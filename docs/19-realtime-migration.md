@@ -1,8 +1,8 @@
-# Tutorial 19 — Realtime (Hybrid) Migration from a Druid Kafka Datasource
+# Tutorial 19 — Realtime (Hybrid) Migration from a Druid Streaming Datasource
 
 The `dpm generate` command handles a single-source migration. When the
-Druid datasource is a Kafka **realtime** ingestion, however, you usually
-want both sides at once:
+Druid datasource is a **realtime** ingestion (Kafka or Kinesis),
+however, you usually want both sides at once:
 
 - An **OFFLINE** Pinot table holding everything Druid had already published
   before the cutover (the *historical* portion).
@@ -276,8 +276,39 @@ overlord-client protocols. No changes needed to `hybrid_planner`.
 
 ---
 
+## Kinesis hybrid migration
+
+The same three-command flow works for a Druid **Kinesis** datasource —
+`extract-offsets`, `plan-hybrid`, and `backfill-batch` are all
+platform-aware:
+
+- **`dpm extract-offsets`** detects a Kinesis supervisor from its status
+  shape and captures per-**shard sequence numbers** (instead of Kafka's
+  per-partition offsets) plus the same watermark timestamp. The captured
+  `offsets.json` carries `"platform": "kinesis"` and a `shard_sequences`
+  array.
+- **`dpm plan-hybrid`** generates a REALTIME table with a `streamType:
+  kinesis` config whose `stream.kinesis.consumer.prop.auto.offset.reset`
+  is set to the watermark ISO timestamp — Pinot's Kinesis consumer
+  honours a timestamp offset criterion exactly as the Kafka consumer
+  does, so the cutover boundary works identically.
+- **Sequence numbers are documentation, not a seed.** Unlike Kafka,
+  Kinesis sequence numbers are opaque per-shard strings that can't be
+  replayed across consumers — but they don't need to be. The watermark
+  timestamp is the only active seed; the runbook lists the captured
+  sequence numbers for the operator's reference only.
+
+Everything else — the OFFLINE backfill, the hybrid query routing, the
+runbook — is identical to the Kafka flow. Credentials for the Kinesis
+REALTIME table come from the Pinot server's AWS environment (IAM role /
+env vars), not the generated config; see
+[Tutorial 05 — Kinesis Streaming](05-kinesis-streaming.md).
+
+---
+
 ## See also
 
 - [Tutorial 04 — Kafka Streaming](04-kafka-streaming.md)
+- [Tutorial 05 — Kinesis Streaming](05-kinesis-streaming.md)
 - [Tutorial 18 — Production Checklist](18-production-checklist.md)
 - [Reference: CLI](reference/cli.md)

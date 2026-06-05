@@ -158,3 +158,97 @@ class TestWriteHybridPlan:
               ["stream.kafka.consumer.prop.auto.offset.reset"]
             == watermark.watermark_iso
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kinesis end-to-end: a Kinesis canonical + Kinesis watermark must produce a
+# Kinesis REALTIME table whose auto.offset.reset is the watermark timestamp.
+# This is the load-bearing assertion for Kinesis hybrid cutover.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from migrator.realtime.models import KinesisShardSequence, StreamOffsetMap
+
+
+@pytest.fixture
+def kinesis_canonical() -> CanonicalMigrationModel:
+    return CanonicalMigrationModel(
+        datasource_name="payments",
+        source_kind="stream",
+        classification="raw_event",
+        time_field=TimeField(column_name="ts", format="millis", timezone="UTC"),
+        dimensions=[DimensionField(name="region", druid_type="string", pinot_type="STRING")],
+        metrics=[MetricField(
+            name="count", druid_type="count", pinot_type="LONG", aggregation="COUNT",
+        )],
+        granularity=GranularityInfo(
+            segment_granularity="HOUR",
+            query_granularity="MINUTE",
+            rollup=False,
+            intervals=["2024-02-01T00:00:00.000Z/2024-04-01T00:00:00.000Z"],
+        ),
+        raw_io_config={
+            "type": "kinesis",
+            "stream": "payment-events",
+            "endpoint": "kinesis.us-east-1.amazonaws.com",
+        },
+    )
+
+
+@pytest.fixture
+def kinesis_watermark() -> StreamOffsetMap:
+    return StreamOffsetMap(
+        platform=StreamPlatform.KINESIS,
+        topic="payment-events",
+        supervisor_id="payments-sup",
+        datasource="payments",
+        watermark_iso="2024-03-01T00:00:00.000+00:00",
+        watermark_ms=1709251200000,
+        shard_sequences=[
+            KinesisShardSequence(shard_id="shardId-000000000000", sequence_number="100"),
+        ],
+    )
+
+
+class TestPlanHybridMigrationKinesis:
+    def test_realtime_is_kinesis_stream_config(self, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        sc = plan.realtime_table["tableIndexConfig"]["streamConfigs"]
+        assert sc["streamType"] == "kinesis"
+        assert sc["stream.kinesis.topic.name"] == "payment-events"
+        # No Kafka keys leak into a Kinesis hybrid plan.
+        assert not any(k.startswith("stream.kafka.") for k in sc)
+
+    def test_realtime_uses_watermark_as_offset_reset(self, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        sc = plan.realtime_table["tableIndexConfig"]["streamConfigs"]
+        assert (
+            sc["stream.kinesis.consumer.prop.auto.offset.reset"]
+            == kinesis_watermark.watermark_iso
+        )
+
+    def test_region_extracted_from_endpoint(self, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        sc = plan.realtime_table["tableIndexConfig"]["streamConfigs"]
+        assert sc["region"] == "us-east-1"
+
+    def test_backfill_range_ends_at_watermark(self, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        assert plan.backfill_range.end_iso == kinesis_watermark.watermark_iso
+
+    def test_runbook_mentions_kinesis_stream(self, tmp_path, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        paths = write_hybrid_plan(plan, tmp_path)
+        rb = paths["runbook"].read_text()
+        assert "Kinesis stream" in rb
+        assert "stream.kinesis.consumer.prop.auto.offset.reset" in rb
+        # Per-shard sequence table rendered, not the partition table.
+        assert "Per-shard sequence numbers" in rb
+        assert "shardId-000000000000" in rb
+
+    def test_watermark_json_round_trips_kinesis(self, tmp_path, kinesis_canonical, kinesis_watermark):
+        plan = plan_hybrid_migration(kinesis_canonical, kinesis_watermark)
+        paths = write_hybrid_plan(plan, tmp_path)
+        wm = json.loads(paths["watermark"].read_text())
+        assert wm["platform"] == "kinesis"
+        assert wm["shard_sequences"][0]["shard_id"] == "shardId-000000000000"

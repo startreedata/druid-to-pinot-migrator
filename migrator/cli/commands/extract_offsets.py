@@ -1,4 +1,10 @@
-"""``dpm extract-offsets`` — capture a Druid Kafka supervisor's offsets."""
+"""``dpm extract-offsets`` — capture a Druid streaming supervisor's position.
+
+Works for both Kafka (per-partition offsets) and Kinesis (per-shard
+sequence numbers). The watermark timestamp is the active cutover seed
+for both; the per-partition / per-shard positions are captured for the
+runbook.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +18,9 @@ from migrator.realtime.offset_io import save_offset_map
 
 
 def command(
-    supervisor_id: str = typer.Option(..., help="Druid Kafka supervisor ID."),
+    supervisor_id: str = typer.Option(
+        ..., help="Druid streaming supervisor ID (Kafka or Kinesis)."
+    ),
     overlord_url: str = typer.Option(
         "http://localhost:8081",
         help="Druid Overlord (or Router) base URL.",
@@ -61,7 +69,7 @@ def command(
         ),
     ),
 ) -> None:
-    """Snapshot Druid's per-partition Kafka offsets and watermark timestamp."""
+    """Snapshot a Druid supervisor's stream position and watermark timestamp."""
     try:
         druid_session = session_from_env(
             "DRUID",
@@ -82,8 +90,12 @@ def command(
 
         typer.echo(_json.dumps(offset_map.model_dump(mode="json"), indent=2))
     else:
+        if offset_map.shard_sequences:
+            positions = f"shards={len(offset_map.shard_sequences)}"
+        else:
+            positions = f"partitions={len(offset_map.offsets)}"
         typer.echo(
-            f"Wrote offset map for supervisor '{supervisor_id}' to {out} "
-            f"(watermark={offset_map.watermark_iso}, "
-            f"partitions={len(offset_map.offsets)})"
+            f"Wrote offset map for {offset_map.platform.value} supervisor "
+            f"'{supervisor_id}' to {out} "
+            f"(watermark={offset_map.watermark_iso}, {positions})"
         )

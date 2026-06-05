@@ -170,7 +170,11 @@ the same way Kafka offsets are exposed for Kafka tables.
 
 For hybrid (OFFLINE + REALTIME) migrations, the watermark snapshot still
 captures a UTC ISO timestamp — Pinot's Kinesis plugin honours
-`auto.offset.reset` set to a timestamp, just like Kafka.
+`auto.offset.reset` set to a timestamp, just like Kafka. `dpm
+extract-offsets` captures the per-shard sequence numbers (for the
+runbook) plus that watermark; `dpm plan-hybrid` / `dpm cutover` then
+drive the full OFFLINE-backfill + REALTIME-from-watermark cutover. See
+[Tutorial 19 — Realtime (Hybrid) Migration](19-realtime-migration.md#kinesis-hybrid-migration).
 
 ---
 

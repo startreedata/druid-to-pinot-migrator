@@ -220,3 +220,124 @@ class TestGetSupervisorOffsets:
         assert re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", m.watermark_iso
         ), m.watermark_iso
+
+    def test_kafka_happy_path_does_not_fetch_spec(self, overlord_url):
+        # When topic + offsets are in the status payload, the platform is
+        # detected without a spec call — only the status URL is hit.
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/s/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "topic": "t", "dataSource": "d",
+                    "latestOffsets": {"0": 1},
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("s")
+        assert m.platform == StreamPlatform.KAFKA
+        # The spec endpoint was never called.
+        assert all(not url.endswith("/supervisor/s") for url in session.calls)
+
+
+class TestGetSupervisorOffsetsKinesis:
+    def test_kinesis_happy_path(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "stream": "payment-events",
+                    "dataSource": "payments",
+                    "latestSequenceNumbers": {
+                        "shardId-000000000001": "49590200",
+                        "shardId-000000000000": "49590100",
+                    },
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("k")
+        assert m.platform == StreamPlatform.KINESIS
+        assert m.topic == "payment-events"
+        assert m.stream_name == "payment-events"
+        assert m.datasource == "payments"
+        assert m.offsets == []
+        # Sorted by shard id.
+        assert [s.shard_id for s in m.shard_sequences] == [
+            "shardId-000000000000", "shardId-000000000001",
+        ]
+        assert m.sequence_for("shardId-000000000000") == "49590100"
+        assert m.watermark_iso.startswith("2024-03-01")
+        # Detected from payload shape — no spec call.
+        assert all(not url.endswith("/supervisor/k") for url in session.calls)
+
+    def test_kinesis_falls_back_to_currentSequenceNumbers(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "stream": "evts",
+                    "currentSequenceNumbers": {"shardId-0": "5"},
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("k")
+        assert m.platform == StreamPlatform.KINESIS
+        assert m.sequence_for("shardId-0") == "5"
+
+    def test_kinesis_stream_from_spec_when_absent_in_payload(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/k"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "latestSequenceNumbers": {"shardId-0": "5"},
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+            spec_url: _Resp(200, {
+                "type": "kinesis",
+                "spec": {"ioConfig": {"stream": "from-spec-stream"}},
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("k")
+        assert m.topic == "from-spec-stream"
+
+    def test_kinesis_raises_when_stream_unresolvable(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/k"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "latestSequenceNumbers": {"shardId-0": "5"},
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+            spec_url: _Resp(200, {"type": "kinesis", "spec": {}}),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        with pytest.raises(DruidOverlordError, match="Kinesis stream"):
+            client.get_supervisor_offsets("k")
+
+    def test_kinesis_skips_empty_sequence_numbers(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "stream": "evts",
+                    "latestSequenceNumbers": {
+                        "shardId-0": "5", "shardId-1": None, "shardId-2": "",
+                    },
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("k")
+        # Only the shard with a real sequence number is kept.
+        assert [s.shard_id for s in m.shard_sequences] == ["shardId-0"]

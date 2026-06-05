@@ -23,6 +23,14 @@ def write_runbook(plan: HybridMigrationPlan, out_dir: str | Path) -> Path:
 
 def _render(plan: HybridMigrationPlan) -> str:
     wm = plan.watermark
+    is_kinesis = str(getattr(wm.platform, "value", wm.platform)) == "kinesis"
+    stream_word = "Kinesis stream" if is_kinesis else "Kafka topic"
+    supervisor_word = "Kinesis" if is_kinesis else "Kafka"
+    offset_reset_key = (
+        "stream.kinesis.consumer.prop.auto.offset.reset"
+        if is_kinesis
+        else "stream.kafka.consumer.prop.auto.offset.reset"
+    )
     parts: list[str] = []
     parts.append(f"# Migration Runbook — {plan.datasource_name}\n")
     parts.append(
@@ -36,7 +44,7 @@ def _render(plan: HybridMigrationPlan) -> str:
     parts.append(
         f"- Captured at: `{wm.captured_at_iso}`\n"
         f"- Druid supervisor: `{wm.supervisor_id or '(none)'}`\n"
-        f"- Kafka topic: `{wm.topic}`\n"
+        f"- {stream_word}: `{wm.topic}`\n"
         f"- Boundary timestamp: `{wm.watermark_iso}` ({wm.watermark_ms} ms)\n"
     )
     if wm.offsets:
@@ -44,9 +52,17 @@ def _render(plan: HybridMigrationPlan) -> str:
         parts.append("| Partition | Offset |\n|---|---|\n")
         for po in sorted(wm.offsets, key=lambda x: x.partition):
             parts.append(f"| {po.partition} | {po.offset} |\n")
+    if wm.shard_sequences:
+        parts.append(
+            "\n**Per-shard sequence numbers** (informational; Pinot uses the "
+            "timestamp — Kinesis sequence numbers are not replayed):\n"
+        )
+        parts.append("| Shard | Sequence number |\n|---|---|\n")
+        for ss in sorted(wm.shard_sequences, key=lambda x: x.shard_id):
+            parts.append(f"| {ss.shard_id} | {ss.sequence_number} |\n")
     parts.append("\n---\n")
 
-    parts.append("## Step 1 — Stop Druid Kafka supervisor\n")
+    parts.append(f"## Step 1 — Stop Druid {supervisor_word} supervisor\n")
     if wm.supervisor_id:
         parts.append(
             "```bash\n"
@@ -72,7 +88,7 @@ def _render(plan: HybridMigrationPlan) -> str:
         "  --data @table-realtime.json \"$PINOT/tables\"\n"
         "```\n\n"
         "Order matters: the OFFLINE table holds data BEFORE the watermark; the "
-        "REALTIME table is configured with `stream.kafka.consumer.prop.auto.offset.reset"
+        f"REALTIME table is configured with `{offset_reset_key}"
         f" = \"{wm.watermark_iso}\"` so Pinot consumes only events from the watermark "
         "onward — there is no overlap with the OFFLINE half.\n"
     )
