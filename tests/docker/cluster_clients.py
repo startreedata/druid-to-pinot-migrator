@@ -26,6 +26,12 @@ PINOT_BROKER_URL = "http://localhost:18099"
 KAFKA_BOOTSTRAP_HOST = "localhost:19092"
 KAFKA_BOOTSTRAP_INTERNAL = "kafka:9092"
 
+# LocalStack Kinesis endpoints: host-side (boto3 in the test) vs in-network
+# (Druid's kinesis supervisor). Both reach the same LocalStack gateway.
+LOCALSTACK_KINESIS_HOST = "http://localhost:14566"
+LOCALSTACK_KINESIS_INTERNAL = "http://localstack:4566"
+KINESIS_REGION = "us-east-1"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Druid client
@@ -474,7 +480,77 @@ class KafkaTestClient:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Druid supervisor helper (Kafka indexing service)
+# Kinesis test client (boto3 → LocalStack)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class KinesisTestClient:
+    """Tiny Kinesis producer/admin wrapper (boto3 against LocalStack).
+
+    Used by the live Kinesis cutover test to create a stream and put
+    JSON records. boto3 is a dev-only dependency, so it's imported
+    lazily; the live test ``importorskip``s it.
+    """
+
+    def __init__(
+        self,
+        endpoint: str = LOCALSTACK_KINESIS_HOST,
+        region: str = KINESIS_REGION,
+    ) -> None:
+        import boto3
+
+        self._client = boto3.client(
+            "kinesis",
+            endpoint_url=endpoint,
+            region_name=region,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+        )
+
+    def wait_healthy(self, timeout: int = 120) -> None:
+        deadline = time.time() + timeout
+        last_err: Exception | None = None
+        while time.time() < deadline:
+            try:
+                self._client.list_streams()
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                time.sleep(2)
+        raise TimeoutError(f"LocalStack Kinesis not healthy: {last_err}")
+
+    def create_stream(self, name: str, shards: int = 1) -> None:
+        """Create a stream and block until it is ACTIVE (idempotent)."""
+        try:
+            self._client.create_stream(StreamName=name, ShardCount=shards)
+        except self._client.exceptions.ResourceInUseException:
+            pass  # already exists
+        waiter = self._client.get_waiter("stream_exists")
+        waiter.wait(StreamName=name, WaiterConfig={"Delay": 2, "MaxAttempts": 30})
+
+    def put_json(
+        self,
+        stream: str,
+        records: list[dict],
+        partition_key_field: str | None = None,
+    ) -> None:
+        """Put JSON-serialised records. PartitionKey from a field if given,
+        else a rotating key so records spread across shards."""
+        for i, rec in enumerate(records):
+            pk = (
+                str(rec[partition_key_field])
+                if partition_key_field
+                else str(i)
+            )
+            self._client.put_record(
+                StreamName=stream,
+                Data=json.dumps(rec).encode("utf-8"),
+                PartitionKey=pk,
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Druid supervisor helper (Kafka + Kinesis indexing services)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -545,6 +621,68 @@ class DruidSupervisorClient:
             # bare HTTPError("400 Bad Request") for debugging.
             raise RuntimeError(
                 f"Druid supervisor submission failed: "
+                f"HTTP {r.status_code} {r.reason}\nbody: {r.text[:600]}"
+            )
+        return r.json()["id"]
+
+    def submit_kinesis_supervisor(
+        self,
+        datasource: str,
+        stream: str,
+        endpoint: str = LOCALSTACK_KINESIS_INTERNAL,
+        timestamp_col: str = "timestamp",
+        timestamp_format: str = "millis",
+        dimensions: list[str] | None = None,
+    ) -> str:
+        """Submit a Kinesis supervisor spec (pointed at LocalStack);
+        return supervisor ID. Mirrors ``submit_kafka_supervisor`` but with
+        the kinesis ioConfig: ``stream`` + ``endpoint`` instead of
+        ``topic`` + ``consumerProperties``, and ``useEarliestSequenceNumber``
+        so it reads the records produced before it started."""
+        spec = {
+            "type": "kinesis",
+            "spec": {
+                "dataSchema": {
+                    "dataSource": datasource,
+                    "timestampSpec": {
+                        "column": timestamp_col,
+                        "format": timestamp_format,
+                    },
+                    "dimensionsSpec": {"dimensions": dimensions or []},
+                    "metricsSpec": [],
+                    "granularitySpec": {
+                        "type": "uniform",
+                        "segmentGranularity": "HOUR",
+                        "queryGranularity": "MINUTE",
+                        "rollup": False,
+                    },
+                },
+                "ioConfig": {
+                    "stream": stream,
+                    # AWS SDK v1 EndpointConfiguration honours the http://
+                    # scheme verbatim, so this targets LocalStack directly.
+                    "endpoint": endpoint,
+                    "inputFormat": {"type": "json"},
+                    "useEarliestSequenceNumber": True,
+                    "taskCount": 1,
+                    "replicas": 1,
+                    "taskDuration": "PT300S",
+                },
+                "tuningConfig": {
+                    "type": "kinesis",
+                    "maxRowsInMemory": 10_000,
+                    "maxRowsPerSegment": 100_000,
+                },
+            },
+        }
+        r = self.session.post(
+            f"{self.router_url}/druid/indexer/v1/supervisor",
+            data=json.dumps(spec),
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Druid kinesis supervisor submission failed: "
                 f"HTTP {r.status_code} {r.reason}\nbody: {r.text[:600]}"
             )
         return r.json()["id"]

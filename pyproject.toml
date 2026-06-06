@@ -74,6 +74,9 @@ packages = ["migrator"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600
+markers = [
+    "kinesis: live tests that require the LocalStack Kinesis service (deselect per-combo with -m 'not kinesis')",
+]
 
 [tool.coverage.run]
 source = ["migrator"]
