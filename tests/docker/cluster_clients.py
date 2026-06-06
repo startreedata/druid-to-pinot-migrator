@@ -687,6 +687,42 @@ class DruidSupervisorClient:
             )
         return r.json()["id"]
 
+    def wait_for_positions(
+        self,
+        supervisor_id: str,
+        timeout: int = 240,
+    ) -> dict:
+        """Poll supervisor status until its position map (``latestOffsets`` /
+        ``currentOffsets``) is populated with at least one non-empty value,
+        and return the last status.
+
+        Works for both Kafka (int offsets) and Kinesis (string sequence
+        numbers) — Druid reports both under ``latestOffsets``. Druid emits
+        these on a periodic cycle that lags ingestion, so a row-count wait
+        is NOT sufficient to guarantee a capturable payload; this waits for
+        the actual signal ``get_supervisor_offsets`` reads."""
+        url = f"{self.router_url}/druid/indexer/v1/supervisor/{supervisor_id}/status"
+        deadline = time.time() + timeout
+        last: dict = {}
+        while time.time() < deadline:
+            try:
+                r = self.session.get(url, timeout=10)
+                r.raise_for_status()
+                last = r.json()
+                payload = last.get("payload") or {}
+                pos = payload.get("latestOffsets") or payload.get("currentOffsets") or {}
+                if isinstance(pos, dict) and any(
+                    v is not None and str(v) != "" for v in pos.values()
+                ):
+                    return last
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(
+            f"Supervisor {supervisor_id} did not report a populated position "
+            f"map within {timeout}s. Last={last}"
+        )
+
     def wait_for_offsets(
         self,
         supervisor_id: str,

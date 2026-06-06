@@ -39,8 +39,6 @@ the rest of the live suite.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from migrator.druid.overlord_client import DruidOverlordClient
@@ -72,30 +70,6 @@ def _events(count: int) -> list[dict]:
     ]
 
 
-def _row_count(druid: DruidClient, ds: str) -> int:
-    rows = druid.sql_query(f'SELECT COUNT(*) AS cnt FROM "{ds}"')
-    return int(rows[0]["cnt"]) if rows else 0
-
-
-def _wait_for_rows(druid: DruidClient, ds: str, minimum: int, timeout: int = 300) -> int:
-    """Kinesis positions are opaque strings, so we can't sum offsets like
-    the Kafka test — instead wait until Druid has actually ingested rows."""
-    deadline = time.time() + timeout
-    last = 0
-    while time.time() < deadline:
-        try:
-            last = _row_count(druid, ds)
-            if last >= minimum:
-                return last
-        except Exception:
-            pass
-        time.sleep(5)
-    raise TimeoutError(
-        f"Druid datasource {ds!r} only reached {last} rows (< {minimum}) "
-        f"within {timeout}s"
-    )
-
-
 @pytest.fixture(scope="module")
 def kinesis_state(
     druid: DruidClient,
@@ -117,7 +91,11 @@ def kinesis_state(
         endpoint=LOCALSTACK_KINESIS_INTERNAL,
         dimensions=["user_id"],
     )
-    _wait_for_rows(druid, DS, minimum=N, timeout=300)
+    # Wait until Druid has reported a populated position map — Druid emits
+    # latestOffsets on a periodic cycle that lags ingestion, so this (not a
+    # row count) is the signal that get_supervisor_offsets can capture
+    # sequence numbers from.
+    supervisor_client.wait_for_positions(sup_id, timeout=300)
 
     # 3) Capture via the migrator's own client — the REAL status payload
     overlord = DruidOverlordClient(DRUID_ROUTER_URL)
