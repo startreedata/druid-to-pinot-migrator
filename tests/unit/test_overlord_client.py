@@ -80,6 +80,30 @@ class TestGetSupervisorOffsets:
         assert m.watermark_iso.startswith("2024-03-01")
         assert m.watermark_ms == 1709251200000
 
+    def test_kafka_payload_with_stream_field_keeps_offsets(self, overlord_url):
+        # Regression for the live-matrix break: a real Druid Kafka
+        # supervisor status carries BOTH a ``stream`` field (the topic
+        # name, in Druid's unified report) AND ``latestOffsets``. The
+        # client must detect Kafka and preserve the offsets — not
+        # misroute to Kinesis and drop them.
+        status_payload = {
+            "payload": {
+                "stream": "events",
+                "topic": "events",
+                "dataSource": "events_ds",
+                "latestOffsets": {"0": 100, "1": 250},
+                "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+            }
+        }
+        session = _MockSession({
+            f"{overlord_url}/druid/indexer/v1/supervisor/sup1/status": _Resp(200, status_payload),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("sup1")
+        assert m.platform == StreamPlatform.KAFKA
+        assert m.offset_dict == {0: 100, 1: 250}
+        assert m.shard_sequences == []
+
     def test_falls_back_to_currentOffsets(self, overlord_url):
         # Some Druid versions only emit `currentOffsets`
         status_payload = {
@@ -432,7 +456,7 @@ class TestDetectPlatformHelpers:
             {"latestSequenceNumbers": {}}
         ) == StreamPlatform.KINESIS
         assert _detect_platform_from_payload(
-            {"stream": "s"}
+            {"currentSequenceNumbers": {}}
         ) == StreamPlatform.KINESIS
 
     def test_from_payload_kafka_signals(self):
@@ -440,7 +464,26 @@ class TestDetectPlatformHelpers:
             {"latestOffsets": {}}
         ) == StreamPlatform.KAFKA
         assert _detect_platform_from_payload(
-            {"topic": "t"}
+            {"currentOffsets": {}}
+        ) == StreamPlatform.KAFKA
+
+    def test_stream_key_alone_is_not_a_kinesis_signal(self):
+        # Regression for the live-matrix break: Druid's unified
+        # supervisor report carries a ``stream`` field for BOTH Kafka
+        # and Kinesis (it holds the topic name on Kafka). ``stream``
+        # alone must NOT imply Kinesis, or real Kafka supervisors get
+        # misrouted into the Kinesis branch and lose their offsets.
+        assert _detect_platform_from_payload({"stream": "s"}) is None
+
+    def test_topic_key_alone_is_not_a_signal(self):
+        assert _detect_platform_from_payload({"topic": "t"}) is None
+
+    def test_kafka_payload_with_stream_field_detected_as_kafka(self):
+        # The exact real-Druid shape that broke the live matrix: a Kafka
+        # supervisor status carrying both ``stream`` and ``latestOffsets``.
+        # The offset map must win → Kafka, offsets preserved.
+        assert _detect_platform_from_payload(
+            {"stream": "events", "latestOffsets": {"0": 100}}
         ) == StreamPlatform.KAFKA
 
     def test_from_payload_ambiguous_returns_none(self):

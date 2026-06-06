@@ -129,12 +129,13 @@ class DruidOverlordClient:
         Build a :class:`StreamOffsetMap` for the given supervisor.
 
         Works for both Kafka and Kinesis supervisors. The platform is
-        detected from the status payload's shape first (Kinesis exposes
-        ``latestSequenceNumbers`` / ``stream``; Kafka exposes
-        ``latestOffsets`` / ``topic``) — no extra HTTP call. Only when
-        the payload is ambiguous is the supervisor spec consulted (and
-        defensively: a spec-endpoint hiccup must not fail a status
-        snapshot).
+        detected from the status payload's position map (Kinesis exposes
+        ``latestSequenceNumbers``; Kafka exposes ``latestOffsets``) —
+        the only reliable discriminator, since Druid's unified report
+        carries a ``stream`` field for both. No extra HTTP call in the
+        common case. Only when the payload has neither position map is
+        the supervisor spec consulted (and defensively: a spec-endpoint
+        hiccup must not fail a status snapshot).
 
         Synthesis logic (common):
 
@@ -299,18 +300,27 @@ def _detect_platform_from_payload(payload: dict) -> StreamPlatform | None:
     """Detect the platform from the status payload's shape alone, or
     None if the payload carries no discriminating signal.
 
-    Kinesis supervisor status exposes ``latestSequenceNumbers`` /
-    ``currentSequenceNumbers`` / ``stream``; Kafka exposes
-    ``latestOffsets`` / ``currentOffsets`` / ``topic``. Checking the
-    payload avoids a spec fetch for the common case.
+    The ONLY reliable per-platform keys are the position maps:
+    Kinesis status exposes ``latestSequenceNumbers`` /
+    ``currentSequenceNumbers``; Kafka exposes ``latestOffsets`` /
+    ``currentOffsets``. Detecting from these avoids a spec fetch for
+    the common case.
+
+    Crucially we do NOT key off ``stream`` / ``topic``: Druid's unified
+    supervisor report payload carries a ``stream`` field for *both*
+    Kafka and Kinesis (it holds the topic name on Kafka), so treating
+    ``stream`` as a Kinesis signal misroutes real Kafka supervisors
+    into the Kinesis branch and drops their offsets. When the payload
+    has neither position map (rare), return None and let the spec's
+    authoritative top-level ``type`` decide.
     """
     if any(
         k in payload
-        for k in ("latestSequenceNumbers", "currentSequenceNumbers", "stream")
+        for k in ("latestSequenceNumbers", "currentSequenceNumbers")
     ):
         return StreamPlatform.KINESIS
     if any(
-        k in payload for k in ("latestOffsets", "currentOffsets", "topic")
+        k in payload for k in ("latestOffsets", "currentOffsets")
     ):
         return StreamPlatform.KAFKA
     return None
