@@ -23,7 +23,13 @@ from migrator.pinot.deployer import DeployReport, DeployResult
 from migrator.preflight import PreflightCheck
 from migrator.realtime.backfill_runner import BackfillResult
 from migrator.realtime.cutover import CutoverReport, CutoverStepResult
-from migrator.realtime.models import KafkaOffsetMap, KafkaPartitionOffset
+from migrator.realtime.models import (
+    KafkaOffsetMap,
+    KafkaPartitionOffset,
+    KinesisShardSequence,
+    StreamOffsetMap,
+    StreamPlatform,
+)
 
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -253,6 +259,36 @@ class TestExtractOffsetsCommand:
             ])
         assert result.exit_code == 0
         assert json.loads(result.output)["supervisor_id"] == "sup1"
+
+    def test_extract_offsets_kinesis_reports_shards(self, tmp_path: Path):
+        offset_map = StreamOffsetMap(
+            platform=StreamPlatform.KINESIS,
+            supervisor_id="k-sup",
+            topic="payment-events",
+            datasource="payments",
+            watermark_iso="2024-01-01T00:00:00.000+00:00",
+            watermark_ms=1704067200000,
+            shard_sequences=[
+                KinesisShardSequence(
+                    shard_id="shardId-000000000000", sequence_number="42"
+                ),
+            ],
+        )
+        with patch(
+            "migrator.cli.commands.extract_offsets.DruidOverlordClient"
+        ) as mock_client:
+            mock_client.return_value.get_supervisor_offsets.return_value = offset_map
+            out = tmp_path / "offsets.json"
+            result = runner.invoke(app, [
+                "extract-offsets",
+                "--supervisor-id", "k-sup",
+                "--out", str(out),
+            ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        # Summary names the platform and reports shards (not partitions).
+        assert "kinesis" in result.output
+        assert "shards=1" in result.output
 
     def test_extract_offsets_invalid_auth_exits_2(self, tmp_path: Path):
         result = runner.invoke(app, [

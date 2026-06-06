@@ -7,6 +7,8 @@ import pytest
 from migrator.druid.overlord_client import (
     DruidOverlordClient,
     DruidOverlordError,
+    _detect_platform,
+    _detect_platform_from_payload,
 )
 from migrator.realtime.models import StreamPlatform
 
@@ -324,6 +326,21 @@ class TestGetSupervisorOffsetsKinesis:
         with pytest.raises(DruidOverlordError, match="Kinesis stream"):
             client.get_supervisor_offsets("k")
 
+    def test_kinesis_raises_when_sequence_numbers_not_a_dict(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "stream": "evts",
+                    "latestSequenceNumbers": "broken",
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        with pytest.raises(DruidOverlordError, match="latestSequenceNumbers"):
+            client.get_supervisor_offsets("k")
+
     def test_kinesis_skips_empty_sequence_numbers(self, overlord_url):
         status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
         session = _MockSession({
@@ -341,3 +358,108 @@ class TestGetSupervisorOffsetsKinesis:
         m = client.get_supervisor_offsets("k")
         # Only the shard with a real sequence number is kept.
         assert [s.shard_id for s in m.shard_sequences] == ["shardId-0"]
+
+
+class TestPlatformDetectionFallback:
+    """Exercises the spec-based detection path that fires only when the
+    status payload carries no discriminating signal."""
+
+    def test_ambiguous_payload_uses_spec_type_kinesis(self, overlord_url):
+        # Payload has no offsets/sequences/topic/stream → ambiguous, so
+        # the client consults the supervisor spec (type=kinesis) and
+        # captures a watermark-only Kinesis map.
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/k"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "dataSource": "payments",
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+            spec_url: _Resp(200, {
+                "type": "kinesis",
+                "spec": {"ioConfig": {"stream": "payment-events"}},
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("k")
+        assert m.platform == StreamPlatform.KINESIS
+        assert m.topic == "payment-events"
+        assert m.shard_sequences == []  # watermark-only
+
+    def test_ambiguous_payload_uses_spec_type_kafka(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/s/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/s"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "dataSource": "d",
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+            spec_url: _Resp(200, {
+                "type": "kafka",
+                "spec": {"ioConfig": {"topic": "from-spec"}},
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("s")
+        assert m.platform == StreamPlatform.KAFKA
+        assert m.topic == "from-spec"
+
+    def test_ambiguous_payload_spec_fetch_fails_defaults_kafka(self, overlord_url):
+        # Spec endpoint not mocked → _try_get_supervisor_spec swallows
+        # the error and returns {}; detection defaults to Kafka, and the
+        # topic is then unresolvable → a clear error (not a crash).
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/s/status"
+        session = _MockSession({
+            status_url: _Resp(200, {
+                "payload": {
+                    "dataSource": "d",
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }
+            }),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        with pytest.raises(DruidOverlordError, match="topic"):
+            client.get_supervisor_offsets("s")
+
+
+class TestDetectPlatformHelpers:
+    def test_from_payload_kinesis_signals(self):
+        assert _detect_platform_from_payload(
+            {"latestSequenceNumbers": {}}
+        ) == StreamPlatform.KINESIS
+        assert _detect_platform_from_payload(
+            {"stream": "s"}
+        ) == StreamPlatform.KINESIS
+
+    def test_from_payload_kafka_signals(self):
+        assert _detect_platform_from_payload(
+            {"latestOffsets": {}}
+        ) == StreamPlatform.KAFKA
+        assert _detect_platform_from_payload(
+            {"topic": "t"}
+        ) == StreamPlatform.KAFKA
+
+    def test_from_payload_ambiguous_returns_none(self):
+        assert _detect_platform_from_payload({"dataSource": "d"}) is None
+
+    def test_detect_platform_spec_type_wins(self):
+        assert _detect_platform({"type": "kinesis"}, {}) == StreamPlatform.KINESIS
+        assert _detect_platform({"type": "kafka"}, {}) == StreamPlatform.KAFKA
+
+    def test_detect_platform_ioconfig_shape(self):
+        assert _detect_platform(
+            {"spec": {"ioConfig": {"stream": "s"}}}, {}
+        ) == StreamPlatform.KINESIS
+        assert _detect_platform(
+            {"spec": {"ioConfig": {"topic": "t"}}}, {}
+        ) == StreamPlatform.KAFKA
+
+    def test_detect_platform_payload_type_last_resort(self):
+        assert _detect_platform({}, {"type": "kinesis"}) == StreamPlatform.KINESIS
+
+    def test_detect_platform_defaults_kafka(self):
+        assert _detect_platform({}, {}) == StreamPlatform.KAFKA
