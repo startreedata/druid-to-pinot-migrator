@@ -128,14 +128,23 @@ class DruidOverlordClient:
         """
         Build a :class:`StreamOffsetMap` for the given supervisor.
 
-        Works for both Kafka and Kinesis supervisors. The platform is
-        detected from the status payload's position map (Kinesis exposes
-        ``latestSequenceNumbers``; Kafka exposes ``latestOffsets``) —
-        the only reliable discriminator, since Druid's unified report
-        carries a ``stream`` field for both. No extra HTTP call in the
-        common case. Only when the payload has neither position map is
-        the supervisor spec consulted (and defensively: a spec-endpoint
-        hiccup must not fail a status snapshot).
+        Works for both Kafka and Kinesis supervisors.
+
+        Druid's ``/supervisor/{id}/status`` payload is produced by the
+        shared ``SeekableStreamSupervisorReportPayload`` base class, so
+        it is **structurally identical** for Kafka and Kinesis: both
+        report per-partition/per-shard positions under ``latestOffsets``
+        and the stream identifier under ``stream``. (Kinesis values are
+        opaque sequence-number strings; Kafka values are integers — but
+        the field name is the same.) The payload therefore cannot tell
+        the platforms apart on its own.
+
+        The platform is taken from the supervisor **spec's** top-level
+        ``type`` (``kafka`` / ``kinesis``) — the authoritative
+        discriminator. The spec is always fetched (one extra request;
+        ``extract-offsets`` is a one-shot operation, not a hot path). A
+        spec-endpoint failure degrades gracefully via ioConfig shape and
+        an offset-value-type heuristic.
 
         Synthesis logic (common):
 
@@ -143,56 +152,55 @@ class DruidOverlordClient:
           ``lastIngestedTimestamp`` / ``aggregateLag.timestamp`` /
           ``timestamp``, falling back to "now".
         - ``datasource`` comes from the status payload or supervisor id.
+        - Positions come from ``latestOffsets`` (``currentOffsets`` as a
+          fallback for older Druid).
 
         Per platform:
 
-        - **Kafka** — ``topic`` from the payload (spec as fallback);
-          per-partition integer offsets from
-          ``status.payload.latestOffsets`` → ``offsets``.
-        - **Kinesis** — stream name from the payload (spec as fallback);
-          per-shard sequence-number strings from
-          ``status.payload.latestSequenceNumbers`` → ``shard_sequences``.
+        - **Kafka** — per-partition integer offsets → ``offsets``.
+        - **Kinesis** — per-shard sequence-number strings →
+          ``shard_sequences``.
         """
         status = self.get_supervisor_status(supervisor_id)
         payload = status.get("payload") or {}
+        spec = self._try_get_supervisor_spec(supervisor_id)
         datasource = payload.get("dataSource") or supervisor_id
         watermark_ms, watermark_iso = _resolve_watermark(payload)
 
-        # Detect from the payload shape first (no extra call); fall back
-        # to a defensive spec fetch only when the payload is ambiguous.
-        platform = _detect_platform_from_payload(payload)
-        spec: dict | None = None
-        if platform is None:
-            spec = self._try_get_supervisor_spec(supervisor_id)
-            platform = _detect_platform(spec or {}, payload)
+        positions: dict = (
+            payload.get("latestOffsets")
+            or payload.get("currentOffsets")
+            or {}
+        )
+        if not isinstance(positions, dict):
+            raise DruidOverlordError(
+                "Unexpected supervisor status shape: latestOffsets is "
+                f"{type(positions).__name__}, expected dict"
+            )
+
+        platform = _detect_platform(spec, payload, positions)
+
+        # Stream / topic identifier — same ``stream`` field for both,
+        # with the spec's ioConfig as a fallback.
+        stream = (
+            payload.get("stream")
+            or payload.get("topic")
+            or _safe_get(spec, ["spec", "ioConfig", "stream"])
+            or _safe_get(spec, ["spec", "ioConfig", "topic"])
+        )
 
         if platform == StreamPlatform.KINESIS:
-            stream = payload.get("stream")
-            if not stream:
-                if spec is None:
-                    spec = self._try_get_supervisor_spec(supervisor_id)
-                stream = _safe_get(spec or {}, ["spec", "ioConfig", "stream"])
             if not stream:
                 raise DruidOverlordError(
                     f"Could not determine Kinesis stream for supervisor "
                     f"'{supervisor_id}'"
-                )
-            latest_seqs: dict = (
-                payload.get("latestSequenceNumbers")
-                or payload.get("currentSequenceNumbers")
-                or {}
-            )
-            if not isinstance(latest_seqs, dict):
-                raise DruidOverlordError(
-                    "Unexpected supervisor status shape: latestSequenceNumbers "
-                    f"is {type(latest_seqs).__name__}, expected dict"
                 )
             shard_sequences = [
                 KinesisShardSequence(
                     shard_id=str(shard_id),
                     sequence_number=str(seq),
                 )
-                for shard_id, seq in latest_seqs.items()
+                for shard_id, seq in positions.items()
                 if seq is not None and str(seq) != ""
             ]
             return StreamOffsetMap(
@@ -207,30 +215,13 @@ class DruidOverlordClient:
                 ),
             )
 
-        # ── Kafka (default) ──────────────────────────────────────────────
-        topic = payload.get("topic")
-        if not topic:
-            if spec is None:
-                spec = self._try_get_supervisor_spec(supervisor_id)
-            topic = _safe_get(spec or {}, ["spec", "ioConfig", "topic"])
-        if not topic:
+        # ── Kafka ────────────────────────────────────────────────────────
+        if not stream:
             raise DruidOverlordError(
                 f"Could not determine Kafka topic for supervisor '{supervisor_id}'"
             )
-
-        latest_offsets: dict = (
-            payload.get("latestOffsets")
-            or payload.get("currentOffsets")
-            or {}
-        )
-        if not isinstance(latest_offsets, dict):
-            raise DruidOverlordError(
-                "Unexpected supervisor status shape: "
-                f"latestOffsets is {type(latest_offsets).__name__}, expected dict"
-            )
-
         partition_offsets = []
-        for partition_str, offset in latest_offsets.items():
+        for partition_str, offset in positions.items():
             try:
                 partition_offsets.append(
                     KafkaPartitionOffset(
@@ -246,7 +237,7 @@ class DruidOverlordClient:
 
         return StreamOffsetMap(
             platform=StreamPlatform.KAFKA,
-            topic=topic,
+            topic=stream,
             supervisor_id=supervisor_id,
             datasource=datasource,
             watermark_iso=watermark_iso,
@@ -296,46 +287,26 @@ def _safe_get(d: dict, path: list[str]) -> Any:
     return cur
 
 
-def _detect_platform_from_payload(payload: dict) -> StreamPlatform | None:
-    """Detect the platform from the status payload's shape alone, or
-    None if the payload carries no discriminating signal.
-
-    The ONLY reliable per-platform keys are the position maps:
-    Kinesis status exposes ``latestSequenceNumbers`` /
-    ``currentSequenceNumbers``; Kafka exposes ``latestOffsets`` /
-    ``currentOffsets``. Detecting from these avoids a spec fetch for
-    the common case.
-
-    Crucially we do NOT key off ``stream`` / ``topic``: Druid's unified
-    supervisor report payload carries a ``stream`` field for *both*
-    Kafka and Kinesis (it holds the topic name on Kafka), so treating
-    ``stream`` as a Kinesis signal misroutes real Kafka supervisors
-    into the Kinesis branch and drops their offsets. When the payload
-    has neither position map (rare), return None and let the spec's
-    authoritative top-level ``type`` decide.
-    """
-    if any(
-        k in payload
-        for k in ("latestSequenceNumbers", "currentSequenceNumbers")
-    ):
-        return StreamPlatform.KINESIS
-    if any(
-        k in payload for k in ("latestOffsets", "currentOffsets")
-    ):
-        return StreamPlatform.KAFKA
-    return None
-
-
-def _detect_platform(spec: dict, payload: dict) -> StreamPlatform:
+def _detect_platform(
+    spec: dict, payload: dict, positions: dict | None = None,
+) -> StreamPlatform:
     """Detect the streaming platform for a supervisor.
 
+    Druid's status payload is structurally identical for Kafka and
+    Kinesis (shared ``SeekableStreamSupervisorReportPayload``: both use
+    ``latestOffsets`` + ``stream``), so it cannot discriminate on its
+    own. The supervisor **spec** is the source of truth.
+
     Order of evidence:
-      1. Supervisor spec's top-level ``type`` ("kafka" / "kinesis") —
-         the authoritative discriminator Druid stamps on every spec.
+      1. Spec top-level ``type`` (``kafka`` / ``kinesis``) — the
+         authoritative discriminator Druid stamps on every spec.
       2. ioConfig shape: a ``stream`` key (Kinesis) vs ``topic`` (Kafka).
-      3. Status payload ``type`` as a last resort.
-    Defaults to Kafka so any spec the heuristics can't classify keeps
-    the historical behaviour.
+      3. Status payload ``type`` (some Druid versions echo it).
+      4. Last resort when the spec is unavailable: sniff the position
+         VALUES — Kinesis sequence numbers are long opaque strings
+         (~50+ chars), Kafka offsets are short integers.
+    Defaults to Kafka so anything unclassifiable keeps historical
+    behaviour.
     """
     sup_type = str(spec.get("type") or "").lower()
     if "kinesis" in sup_type:
@@ -353,6 +324,17 @@ def _detect_platform(spec: dict, payload: dict) -> StreamPlatform:
     payload_type = str(payload.get("type") or "").lower()
     if "kinesis" in payload_type:
         return StreamPlatform.KINESIS
+    if "kafka" in payload_type:
+        return StreamPlatform.KAFKA
+
+    # Spec unavailable and payload ambiguous: infer from the position
+    # value type. A Kafka offset is an int (or short numeric string); a
+    # Kinesis sequence number is a long opaque numeric string (~56 chars).
+    if positions:
+        sample = next(iter(positions.values()), None)
+        if isinstance(sample, str) and len(sample) >= 20:
+            return StreamPlatform.KINESIS
+
     return StreamPlatform.KAFKA
 
 
