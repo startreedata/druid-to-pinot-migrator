@@ -5,7 +5,7 @@ Designed for testability:
 
 - Takes an injectable ``requests.Session``-like object so unit tests can
   drop in a mock/replay session without monkey-patching.
-- Methods return domain objects (``KafkaOffsetMap``), not raw JSON, so the
+- Methods return domain objects (``StreamOffsetMap``), not raw JSON, so the
   CLI / planner don't need to know about Druid wire format.
 - All HTTP calls have explicit timeouts and raise typed exceptions.
 
@@ -20,8 +20,9 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from migrator.realtime.models import (
-    KafkaOffsetMap,
     KafkaPartitionOffset,
+    KinesisShardSequence,
+    StreamOffsetMap,
     StreamPlatform,
 )
 
@@ -123,32 +124,98 @@ class DruidOverlordClient:
                 return sup_id
         return None
 
-    def get_supervisor_offsets(self, supervisor_id: str) -> KafkaOffsetMap:
+    def get_supervisor_offsets(self, supervisor_id: str) -> StreamOffsetMap:
         """
-        Build a :class:`KafkaOffsetMap` for the given Kafka supervisor.
+        Build a :class:`StreamOffsetMap` for the given supervisor.
 
-        Synthesis logic:
+        Works for both Kafka and Kinesis supervisors. The platform is
+        detected from the status payload's shape first (Kinesis exposes
+        ``latestSequenceNumbers`` / ``stream``; Kafka exposes
+        ``latestOffsets`` / ``topic``) — no extra HTTP call. Only when
+        the payload is ambiguous is the supervisor spec consulted (and
+        defensively: a spec-endpoint hiccup must not fail a status
+        snapshot).
 
-        - Per-partition ``offset`` comes from ``status.payload.latestOffsets``
-          (the highest committed offset Druid has seen).
+        Synthesis logic (common):
+
         - The watermark timestamp comes from the supervisor status's
-          ``status.payload.aggregateLag.timestamp`` if present, falling back
-          to ``status.payload.lastIngestedTimestamp``, falling back to "now".
-        - ``topic`` and ``datasource`` come from the supervisor spec.
+          ``lastIngestedTimestamp`` / ``aggregateLag.timestamp`` /
+          ``timestamp``, falling back to "now".
+        - ``datasource`` comes from the status payload or supervisor id.
+
+        Per platform:
+
+        - **Kafka** — ``topic`` from the payload (spec as fallback);
+          per-partition integer offsets from
+          ``status.payload.latestOffsets`` → ``offsets``.
+        - **Kinesis** — stream name from the payload (spec as fallback);
+          per-shard sequence-number strings from
+          ``status.payload.latestSequenceNumbers`` → ``shard_sequences``.
         """
         status = self.get_supervisor_status(supervisor_id)
         payload = status.get("payload") or {}
+        datasource = payload.get("dataSource") or supervisor_id
+        watermark_ms, watermark_iso = _resolve_watermark(payload)
 
-        topic = payload.get("topic") or _safe_get(
-            self.get_supervisor_spec(supervisor_id),
-            ["spec", "ioConfig", "topic"],
-        )
+        # Detect from the payload shape first (no extra call); fall back
+        # to a defensive spec fetch only when the payload is ambiguous.
+        platform = _detect_platform_from_payload(payload)
+        spec: dict | None = None
+        if platform is None:
+            spec = self._try_get_supervisor_spec(supervisor_id)
+            platform = _detect_platform(spec or {}, payload)
+
+        if platform == StreamPlatform.KINESIS:
+            stream = payload.get("stream")
+            if not stream:
+                if spec is None:
+                    spec = self._try_get_supervisor_spec(supervisor_id)
+                stream = _safe_get(spec or {}, ["spec", "ioConfig", "stream"])
+            if not stream:
+                raise DruidOverlordError(
+                    f"Could not determine Kinesis stream for supervisor "
+                    f"'{supervisor_id}'"
+                )
+            latest_seqs: dict = (
+                payload.get("latestSequenceNumbers")
+                or payload.get("currentSequenceNumbers")
+                or {}
+            )
+            if not isinstance(latest_seqs, dict):
+                raise DruidOverlordError(
+                    "Unexpected supervisor status shape: latestSequenceNumbers "
+                    f"is {type(latest_seqs).__name__}, expected dict"
+                )
+            shard_sequences = [
+                KinesisShardSequence(
+                    shard_id=str(shard_id),
+                    sequence_number=str(seq),
+                )
+                for shard_id, seq in latest_seqs.items()
+                if seq is not None and str(seq) != ""
+            ]
+            return StreamOffsetMap(
+                platform=StreamPlatform.KINESIS,
+                topic=stream,
+                supervisor_id=supervisor_id,
+                datasource=datasource,
+                watermark_iso=watermark_iso,
+                watermark_ms=watermark_ms,
+                shard_sequences=sorted(
+                    shard_sequences, key=lambda s: s.shard_id
+                ),
+            )
+
+        # ── Kafka (default) ──────────────────────────────────────────────
+        topic = payload.get("topic")
+        if not topic:
+            if spec is None:
+                spec = self._try_get_supervisor_spec(supervisor_id)
+            topic = _safe_get(spec or {}, ["spec", "ioConfig", "topic"])
         if not topic:
             raise DruidOverlordError(
                 f"Could not determine Kafka topic for supervisor '{supervisor_id}'"
             )
-
-        datasource = payload.get("dataSource") or supervisor_id
 
         latest_offsets: dict = (
             payload.get("latestOffsets")
@@ -176,9 +243,7 @@ class DruidOverlordClient:
                     f"offset={offset!r}: {exc}"
                 ) from exc
 
-        watermark_ms, watermark_iso = _resolve_watermark(payload)
-
-        return KafkaOffsetMap(
+        return StreamOffsetMap(
             platform=StreamPlatform.KAFKA,
             topic=topic,
             supervisor_id=supervisor_id,
@@ -187,6 +252,17 @@ class DruidOverlordClient:
             watermark_ms=watermark_ms,
             offsets=sorted(partition_offsets, key=lambda po: po.partition),
         )
+
+    def _try_get_supervisor_spec(self, supervisor_id: str) -> dict:
+        """Fetch the supervisor spec, returning ``{}`` on any error.
+
+        Used as a *supplementary* signal (platform detection,
+        topic/stream fallback) — a spec-endpoint failure must not abort
+        an otherwise-complete status snapshot."""
+        try:
+            return self.get_supervisor_spec(supervisor_id)
+        except DruidOverlordError:
+            return {}
 
     # ── internals ──────────────────────────────────────────────────────────
 
@@ -217,6 +293,57 @@ def _safe_get(d: dict, path: list[str]) -> Any:
             return None
         cur = cur[k]
     return cur
+
+
+def _detect_platform_from_payload(payload: dict) -> StreamPlatform | None:
+    """Detect the platform from the status payload's shape alone, or
+    None if the payload carries no discriminating signal.
+
+    Kinesis supervisor status exposes ``latestSequenceNumbers`` /
+    ``currentSequenceNumbers`` / ``stream``; Kafka exposes
+    ``latestOffsets`` / ``currentOffsets`` / ``topic``. Checking the
+    payload avoids a spec fetch for the common case.
+    """
+    if any(
+        k in payload
+        for k in ("latestSequenceNumbers", "currentSequenceNumbers", "stream")
+    ):
+        return StreamPlatform.KINESIS
+    if any(
+        k in payload for k in ("latestOffsets", "currentOffsets", "topic")
+    ):
+        return StreamPlatform.KAFKA
+    return None
+
+
+def _detect_platform(spec: dict, payload: dict) -> StreamPlatform:
+    """Detect the streaming platform for a supervisor.
+
+    Order of evidence:
+      1. Supervisor spec's top-level ``type`` ("kafka" / "kinesis") —
+         the authoritative discriminator Druid stamps on every spec.
+      2. ioConfig shape: a ``stream`` key (Kinesis) vs ``topic`` (Kafka).
+      3. Status payload ``type`` as a last resort.
+    Defaults to Kafka so any spec the heuristics can't classify keeps
+    the historical behaviour.
+    """
+    sup_type = str(spec.get("type") or "").lower()
+    if "kinesis" in sup_type:
+        return StreamPlatform.KINESIS
+    if "kafka" in sup_type:
+        return StreamPlatform.KAFKA
+
+    iocfg = _safe_get(spec, ["spec", "ioConfig"]) or {}
+    if isinstance(iocfg, dict):
+        if "stream" in iocfg and "topic" not in iocfg:
+            return StreamPlatform.KINESIS
+        if "topic" in iocfg:
+            return StreamPlatform.KAFKA
+
+    payload_type = str(payload.get("type") or "").lower()
+    if "kinesis" in payload_type:
+        return StreamPlatform.KINESIS
+    return StreamPlatform.KAFKA
 
 
 def _resolve_watermark(payload: dict) -> tuple[int, str]:

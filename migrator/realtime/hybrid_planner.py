@@ -2,7 +2,7 @@
 Pure planner that builds a hybrid migration plan.
 
 Inputs are already-parsed domain objects (CanonicalMigrationModel,
-KafkaOffsetMap). No file I/O, no network — that lives in the CLI command
+StreamOffsetMap). No file I/O, no network — that lives in the CLI command
 that wraps this module. Keeping the planner pure makes it trivially
 unit-testable and re-usable from other tools (e.g. a CI dashboard or a
 batch UI).
@@ -22,13 +22,13 @@ from migrator.pinot.table_generator import PinotTableGenerator
 from migrator.realtime.models import (
     BackfillRange,
     HybridMigrationPlan,
-    KafkaOffsetMap,
+    StreamOffsetMap,
 )
 
 
 def plan_hybrid_migration(
     canonical: CanonicalMigrationModel,
-    watermark: KafkaOffsetMap,
+    watermark: StreamOffsetMap,
     *,
     backfill_start_iso: str | None = None,
     backfill_page_rows: int = 50_000,

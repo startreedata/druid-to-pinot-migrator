@@ -53,7 +53,7 @@ from migrator.realtime.hybrid_planner import (
     plan_hybrid_migration,
     write_hybrid_plan,
 )
-from migrator.realtime.models import KafkaOffsetMap
+from migrator.realtime.models import StreamOffsetMap
 from migrator.realtime.offset_io import load_offset_map, save_offset_map
 
 
@@ -262,7 +262,7 @@ def run_cutover(
         save_checkpoint(ckpt, cfg.out_dir)
 
     # ── 1. Extract watermark ──────────────────────────────────────────────
-    offset_map: KafkaOffsetMap | None = None
+    offset_map: StreamOffsetMap | None = None
     if _step("extract_offsets"):
         try:
             offset_map = overlord.get_supervisor_offsets(cfg.supervisor_id)

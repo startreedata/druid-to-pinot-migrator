@@ -26,11 +26,11 @@ class StreamPlatform(str, Enum):
     """Supported streaming platforms."""
 
     KAFKA = "kafka"
-    KINESIS = "kinesis"  # placeholder; not yet wired into planner / client
+    KINESIS = "kinesis"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-partition offsets
+# Per-partition / per-shard positions
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -47,29 +47,61 @@ class KafkaPartitionOffset(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class KinesisShardSequence(BaseModel):
+    """Sequence number captured for a single Kinesis shard at a moment in time.
+
+    Kinesis positions are per-shard *sequence numbers* — opaque,
+    monotonically-increasing strings, NOT integer offsets like Kafka.
+    They are captured for the runbook (documentation); the active
+    cutover boundary is the watermark timestamp, which Pinot's Kinesis
+    consumer honours via ``auto.offset.reset`` exactly as the Kafka
+    consumer does.
+    """
+
+    shard_id: str = Field(
+        min_length=1,
+        description="Kinesis shard identifier, e.g. 'shardId-000000000001'.",
+    )
+    sequence_number: str = Field(
+        min_length=1,
+        description="Last sequence number Druid committed for this shard.",
+    )
+
+    model_config = ConfigDict(frozen=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Offset / watermark snapshot
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class KafkaOffsetMap(BaseModel):
+class StreamOffsetMap(BaseModel):
     """
-    Snapshot of a Druid Kafka supervisor's committed position.
+    Snapshot of a Druid streaming supervisor's committed position.
 
-    Two pieces of information are captured together so consumers don't have
-    to recompute either one:
+    Platform-neutral: works for both Kafka and Kinesis supervisors.
+    Two pieces of information are captured together so consumers don't
+    have to recompute either one:
 
-    - ``offsets`` — per-partition Kafka offsets (informational; used for
-      runbook + manual reset via ``kafka-consumer-groups.sh`` if desired)
-    - ``watermark_iso`` — ISO-8601 timestamp at which Druid had committed
-      everything ≤ this point. This is what Pinot consumes via
-      ``stream.kafka.consumer.prop.auto.offset.reset = <watermark_iso>``.
-
-    The watermark is the ACTIVE part of the seed; offsets are documentation.
+    - **Per-shard/partition positions** — informational, for the
+      runbook. Kafka populates ``offsets`` (integer offsets per
+      partition); Kinesis populates ``shard_sequences`` (opaque
+      sequence-number strings per shard). At most one list is non-empty.
+    - ``watermark_iso`` — ISO-8601 timestamp at which Druid had
+      committed everything ≤ this point. This is the ACTIVE part of the
+      seed: Pinot consumes from it via
+      ``stream.<kafka|kinesis>.consumer.prop.auto.offset.reset =
+      <watermark_iso>``. Pinot's Kinesis consumer honours a timestamp
+      offset criterion exactly as the Kafka consumer does, which is why
+      the same hybrid-cutover mechanism works unchanged for Kinesis —
+      the per-shard sequence numbers never need to be replayed.
     """
 
     platform: StreamPlatform = StreamPlatform.KAFKA
-    topic: str
+    topic: str = Field(
+        description="Kafka topic name, or Kinesis stream name — the stream "
+                    "identifier the REALTIME table consumes from.",
+    )
     supervisor_id: str = ""
     datasource: str = ""
     captured_at_iso: str = Field(
@@ -87,22 +119,34 @@ class KafkaOffsetMap(BaseModel):
         ge=0,
         description="Same as watermark_iso, expressed as epoch milliseconds.",
     )
-    offsets: list[KafkaPartitionOffset] = Field(default_factory=list)
+    offsets: list[KafkaPartitionOffset] = Field(
+        default_factory=list,
+        description="Kafka per-partition offsets (empty for Kinesis sources).",
+    )
+    shard_sequences: list[KinesisShardSequence] = Field(
+        default_factory=list,
+        description="Kinesis per-shard sequence numbers (empty for Kafka sources).",
+    )
 
     model_config = ConfigDict()
 
     @field_validator("platform")
     @classmethod
-    def _kafka_only_for_now(cls, v: StreamPlatform) -> StreamPlatform:
-        if v != StreamPlatform.KAFKA:
+    def _supported_platform(cls, v: StreamPlatform) -> StreamPlatform:
+        if v not in (StreamPlatform.KAFKA, StreamPlatform.KINESIS):
             raise ValueError(
-                f"Only StreamPlatform.KAFKA is currently supported (got {v.value}). "
-                "Kinesis is on the roadmap; track via the Kinesis follow-up issue."
+                f"Unsupported stream platform '{v.value}'. "
+                "Supported: kafka, kinesis."
             )
         return v
 
+    @property
+    def stream_name(self) -> str:
+        """Alias for ``topic`` that reads naturally for Kinesis sources."""
+        return self.topic
+
     def offset_for(self, partition: int) -> int | None:
-        """Return the offset for a given partition, or None if not present."""
+        """Return the Kafka offset for a partition, or None if not present."""
         for po in self.offsets:
             if po.partition == partition:
                 return po.offset
@@ -110,8 +154,21 @@ class KafkaOffsetMap(BaseModel):
 
     @property
     def offset_dict(self) -> dict[int, int]:
-        """Per-partition map convenient for runbook / template rendering."""
+        """Per-partition Kafka offset map for runbook / template rendering."""
         return {po.partition: po.offset for po in self.offsets}
+
+    def sequence_for(self, shard_id: str) -> str | None:
+        """Return the Kinesis sequence number for a shard, or None."""
+        for ss in self.shard_sequences:
+            if ss.shard_id == shard_id:
+                return ss.sequence_number
+        return None
+
+
+# Backward-compatibility alias. ``KafkaOffsetMap`` was the original name
+# from when only Kafka was supported; it now points at the platform-
+# neutral model so existing imports / serialised artifacts keep working.
+KafkaOffsetMap = StreamOffsetMap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +219,7 @@ class HybridMigrationPlan(BaseModel):
         default_factory=dict,
         description="Pinot batch-ingestion job spec for the backfill.",
     )
-    watermark: KafkaOffsetMap
+    watermark: StreamOffsetMap
 
     model_config = ConfigDict(populate_by_name=True)
 
