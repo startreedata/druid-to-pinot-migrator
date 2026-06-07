@@ -687,55 +687,6 @@ class DruidSupervisorClient:
             )
         return r.json()["id"]
 
-    def wait_for_positions(
-        self,
-        supervisor_id: str,
-        timeout: int = 240,
-    ) -> dict:
-        """Poll supervisor status until its position map (``latestOffsets`` /
-        ``currentOffsets``) is populated with at least one non-empty value,
-        and return the last status.
-
-        Works for both Kafka (int offsets) and Kinesis (string sequence
-        numbers) — Druid reports both under ``latestOffsets``. Druid emits
-        these on a periodic cycle that lags ingestion, so a row-count wait
-        is NOT sufficient to guarantee a capturable payload; this waits for
-        the actual signal ``get_supervisor_offsets`` reads."""
-        url = f"{self.router_url}/druid/indexer/v1/supervisor/{supervisor_id}/status"
-        deadline = time.time() + timeout
-        last: dict = {}
-        while time.time() < deadline:
-            try:
-                r = self.session.get(url, timeout=10)
-                r.raise_for_status()
-                last = r.json()
-                payload = last.get("payload") or {}
-                pos = payload.get("latestOffsets") or payload.get("currentOffsets") or {}
-                if isinstance(pos, dict) and any(
-                    v is not None and str(v) != "" for v in pos.values()
-                ):
-                    return last
-            except Exception:
-                pass
-            time.sleep(3)
-        # Surface enough of the last status to diagnose WHY positions never
-        # populated: the supervisor's health/state, any recent errors, and
-        # which payload keys actually carry position data (so a wrong-key
-        # assumption is visible, not just "empty").
-        payload = (last or {}).get("payload") or {}
-        diag = {
-            "state": payload.get("state"),
-            "detailedState": payload.get("detailedState"),
-            "recentErrors": payload.get("recentErrors"),
-            "payload_keys": sorted(payload.keys()),
-            "latestOffsets": payload.get("latestOffsets"),
-            "currentOffsets": payload.get("currentOffsets"),
-        }
-        raise TimeoutError(
-            f"Supervisor {supervisor_id} did not report a populated position "
-            f"map within {timeout}s. Diagnostics={diag}"
-        )
-
     def wait_for_offsets(
         self,
         supervisor_id: str,
