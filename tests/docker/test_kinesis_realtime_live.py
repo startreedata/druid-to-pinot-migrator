@@ -54,7 +54,10 @@ from tests.docker.cluster_clients import (
 from tests.docker.migration_helper import build_druid_spec
 
 
-pytestmark = pytest.mark.kinesis
+# reruns=0 overrides the suite-wide `--reruns 2`: a fixture-setup failure
+# here (e.g. the supervisor never reporting positions) must fail ONCE and
+# fast, not retry the multi-minute setup and blow the job's time budget.
+pytestmark = [pytest.mark.kinesis, pytest.mark.flaky(reruns=0)]
 
 BASE_MS = 1_710_000_000_000  # 2024-03-09T16:00:00.000Z
 
@@ -94,8 +97,10 @@ def kinesis_state(
     # Wait until Druid has reported a populated position map — Druid emits
     # latestOffsets on a periodic cycle that lags ingestion, so this (not a
     # row count) is the signal that get_supervisor_offsets can capture
-    # sequence numbers from.
-    supervisor_client.wait_for_positions(sup_id, timeout=300)
+    # sequence numbers from. Bounded tight (90s) + reruns=0 so a wiring
+    # problem fails fast with a diagnostic dump instead of eating the
+    # 45-minute job budget across retries.
+    supervisor_client.wait_for_positions(sup_id, timeout=90)
 
     # 3) Capture via the migrator's own client — the REAL status payload
     overlord = DruidOverlordClient(DRUID_ROUTER_URL)

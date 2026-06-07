@@ -718,9 +718,22 @@ class DruidSupervisorClient:
             except Exception:
                 pass
             time.sleep(3)
+        # Surface enough of the last status to diagnose WHY positions never
+        # populated: the supervisor's health/state, any recent errors, and
+        # which payload keys actually carry position data (so a wrong-key
+        # assumption is visible, not just "empty").
+        payload = (last or {}).get("payload") or {}
+        diag = {
+            "state": payload.get("state"),
+            "detailedState": payload.get("detailedState"),
+            "recentErrors": payload.get("recentErrors"),
+            "payload_keys": sorted(payload.keys()),
+            "latestOffsets": payload.get("latestOffsets"),
+            "currentOffsets": payload.get("currentOffsets"),
+        }
         raise TimeoutError(
             f"Supervisor {supervisor_id} did not report a populated position "
-            f"map within {timeout}s. Last={last}"
+            f"map within {timeout}s. Diagnostics={diag}"
         )
 
     def wait_for_offsets(
