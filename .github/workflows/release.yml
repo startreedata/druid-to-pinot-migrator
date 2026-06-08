@@ -135,7 +135,7 @@ jobs:
       # Codecov: tag this upload as the release line so the dashboard
       # can plot per-release coverage trends, separate from PR runs.
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
