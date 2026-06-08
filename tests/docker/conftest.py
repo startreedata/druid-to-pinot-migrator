@@ -144,10 +144,22 @@ def kafka_client(docker_stack):
 
 @pytest.fixture(scope="session")
 def supervisor_client(docker_stack):
-    """Shared helper for submitting Druid Kafka supervisors."""
+    """Shared helper for submitting Druid Kafka / Kinesis supervisors."""
     from tests.docker.cluster_clients import DruidSupervisorClient
 
     return DruidSupervisorClient()
+
+
+@pytest.fixture(scope="session")
+def kinesis_client(docker_stack):
+    """Shared boto3 Kinesis client against LocalStack. Skips if boto3 is
+    unavailable (it's a dev-only dependency)."""
+    pytest.importorskip("boto3")
+    from tests.docker.cluster_clients import KinesisTestClient
+
+    k = KinesisTestClient()
+    k.wait_healthy(timeout=120)
+    return k
 
 
 # ─────────────────────────────────────────────────────────────────────────────

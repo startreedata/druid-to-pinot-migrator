@@ -363,3 +363,28 @@ services:
       timeout: 10s
       retries: 20
       start_period: 60s
+
+  # ── LocalStack (Kinesis emulator for the live Kinesis cutover test) ────────
+  # Provides an AWS-Kinesis-compatible API at :4566. Druid's
+  # druid-kinesis-indexing-service talks to it via the supervisor
+  # ioConfig ``endpoint: http://localstack:4566`` (AWS SDK v1 honours the
+  # http:// scheme, so there's no TLS/cert friction). The test host uses
+  # the mapped :14566 with boto3 to create the stream and put records.
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: migtest-localstack
+    environment:
+      SERVICES: "kinesis"
+      EAGER_SERVICE_LOADING: "1"
+      DEBUG: "0"
+    ports:
+      - "14566:4566"
+    networks:
+      - migtest
+    mem_limit: 768m
+    # Deliberately NO healthcheck: `docker compose up --wait` would then
+    # block the WHOLE stack on LocalStack, so a LocalStack hiccup would
+    # fail every live test in the cell — not just the Kinesis one. Instead
+    # the ``kinesis_client`` fixture polls readiness via ``wait_healthy()``,
+    # confining any LocalStack flakiness to the (deselectable) ``kinesis``
+    # test. Only the Kinesis live test depends on this service.
