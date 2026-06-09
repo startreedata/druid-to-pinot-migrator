@@ -8,6 +8,7 @@ from migrator.druid.overlord_client import (
     DruidOverlordClient,
     DruidOverlordError,
     _detect_platform,
+    _positions_from_tasks,
 )
 from migrator.realtime.models import StreamPlatform
 
@@ -429,3 +430,132 @@ class TestDetectPlatform:
     def test_defaults_kafka_when_unclassifiable(self):
         assert _detect_platform({}, {}) == StreamPlatform.KAFKA
         assert _detect_platform({}, {}, {}) == StreamPlatform.KAFKA
+
+
+# Representative Kinesis sequence numbers (Kinesis uses 56-digit strings).
+_TASK_SEQ_0 = "49590338765432109876543210987654321098765432109876543210"
+_TASK_SEQ_1 = "49590338000000000000000000000000000000000000000000000099"
+
+
+class TestPositionsFromTasks:
+    """``_positions_from_tasks`` — the fallback that reads consumed
+    positions from activeTasks/publishingTasks[].currentOffsets when the
+    supervisor-level latestOffsets is absent (the real Kinesis case)."""
+
+    def test_merges_active_and_publishing_tasks(self):
+        payload = {
+            "activeTasks": [
+                {"id": "t1", "currentOffsets": {"shardId-000000000000": _TASK_SEQ_0}},
+            ],
+            "publishingTasks": [
+                {"id": "t0", "currentOffsets": {"shardId-000000000001": _TASK_SEQ_1}},
+            ],
+        }
+        merged = _positions_from_tasks(payload)
+        assert merged == {
+            "shardId-000000000000": _TASK_SEQ_0,
+            "shardId-000000000001": _TASK_SEQ_1,
+        }
+
+    def test_handoff_keeps_furthest_kafka_offset_numerically(self):
+        # Same partition reported by a publishing task (older) and an
+        # active task (newer) during handoff — keep the larger. Must be a
+        # NUMERIC compare: lexicographically "100" < "99".
+        payload = {
+            "activeTasks": [{"currentOffsets": {"0": 100}}],
+            "publishingTasks": [{"currentOffsets": {"0": 99}}],
+        }
+        assert _positions_from_tasks(payload) == {"0": 100}
+
+    def test_handoff_keeps_furthest_kinesis_sequence(self):
+        payload = {
+            "activeTasks": [{"currentOffsets": {"shardId-0": _TASK_SEQ_0}}],
+            "publishingTasks": [{"currentOffsets": {"shardId-0": _TASK_SEQ_1}}],
+        }
+        # _TASK_SEQ_0 > _TASK_SEQ_1 numerically.
+        assert _positions_from_tasks(payload) == {"shardId-0": _TASK_SEQ_0}
+
+    def test_skips_empty_and_null_values(self):
+        payload = {
+            "activeTasks": [
+                {"currentOffsets": {"a": _TASK_SEQ_0, "b": None, "c": ""}},
+            ],
+        }
+        assert _positions_from_tasks(payload) == {"a": _TASK_SEQ_0}
+
+    def test_empty_when_no_tasks(self):
+        assert _positions_from_tasks({}) == {}
+        assert _positions_from_tasks({"activeTasks": [], "publishingTasks": []}) == {}
+
+    def test_tolerates_malformed_task_entries(self):
+        payload = {"activeTasks": ["not-a-dict", {"currentOffsets": "nope"}, {}]}
+        assert _positions_from_tasks(payload) == {}
+
+
+class TestGetSupervisorOffsetsFallsBackToTasks:
+    """get_supervisor_offsets must use activeTasks positions when the
+    supervisor-level latestOffsets is absent — the real Druid Kinesis
+    shape that the live test surfaced."""
+
+    def test_kinesis_positions_from_active_tasks(self, overlord_url):
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/k"
+        session = _MockSession({
+            status_url: _Resp(200, {"payload": {
+                "stream": "payment-events",
+                "dataSource": "payments",
+                "state": "RUNNING",
+                # No latestOffsets/currentOffsets at the supervisor level.
+                "activeTasks": [
+                    {"id": "t1", "currentOffsets": {
+                        "shardId-000000000000": _TASK_SEQ_0,
+                        "shardId-000000000001": _TASK_SEQ_1,
+                    }},
+                ],
+                "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+            }}),
+            spec_url: _Resp(200, {
+                "type": "kinesis",
+                "spec": {"ioConfig": {"stream": "payment-events"}},
+            }),
+        })
+        m = DruidOverlordClient(overlord_url, session=session).get_supervisor_offsets("k")
+        assert m.platform == StreamPlatform.KINESIS
+        assert [s.shard_id for s in m.shard_sequences] == [
+            "shardId-000000000000", "shardId-000000000001",
+        ]
+        assert m.sequence_for("shardId-000000000000") == _TASK_SEQ_0
+
+    def test_supervisor_level_offsets_still_win_when_present(self, overlord_url):
+        # If the supervisor DID compute latestOffsets, use that (don't
+        # override with task positions).
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/k/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/k"
+        session = _MockSession({
+            status_url: _Resp(200, {"payload": {
+                "stream": "s",
+                "latestOffsets": {"shardId-0": _TASK_SEQ_0},
+                "activeTasks": [{"currentOffsets": {"shardId-9": _TASK_SEQ_1}}],
+                "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+            }}),
+            spec_url: _Resp(200, {"type": "kinesis", "spec": {}}),
+        })
+        m = DruidOverlordClient(overlord_url, session=session).get_supervisor_offsets("k")
+        assert [s.shard_id for s in m.shard_sequences] == ["shardId-0"]
+
+    def test_kafka_offsets_from_active_tasks(self, overlord_url):
+        # The fallback is platform-agnostic — Kafka benefits too.
+        status_url = f"{overlord_url}/druid/indexer/v1/supervisor/s/status"
+        spec_url = f"{overlord_url}/druid/indexer/v1/supervisor/s"
+        session = _MockSession({
+            status_url: _Resp(200, {"payload": {
+                "topic": "events",
+                "state": "RUNNING",
+                "activeTasks": [{"currentOffsets": {"0": 100, "1": 250}}],
+                "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+            }}),
+            spec_url: _Resp(200, {"type": "kafka", "spec": {}}),
+        })
+        m = DruidOverlordClient(overlord_url, session=session).get_supervisor_offsets("s")
+        assert m.platform == StreamPlatform.KAFKA
+        assert m.offset_dict == {0: 100, 1: 250}
