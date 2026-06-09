@@ -127,7 +127,6 @@ def kinesis_state(
     # exactly as `dpm cutover` does. DruidClient.sql_query is the SQL
     # callable.
     refined_offset_map = refine_watermark(offset_map, druid_sql_query=druid.sql_query)
-    expected_max_ms = BASE_MS + (N - 1) * 1_000
 
     # 4) Terminate (simulate cutover)
     supervisor_client.terminate_supervisor(sup_id)
@@ -160,7 +159,6 @@ def kinesis_state(
         "n": N,
         "positions_populated": positions_populated,
         "refined_offset_map": refined_offset_map,
-        "expected_max_ms": expected_max_ms,
     }
 
     supervisor_client.terminate_supervisor(sup_id)
@@ -232,9 +230,15 @@ class TestKinesisRealtimeMigration:
     def test_watermark_refines_to_max_event_time(self, kinesis_state):
         # refine_watermark replaces the estimated now()-watermark with the
         # datasource's MAX(__time) — the precise cutover boundary. Our 50
-        # events run BASE_MS .. BASE_MS+49s, so MAX(__time) is the last one.
+        # events run BASE_MS .. BASE_MS+49s. Assert the refined watermark
+        # landed inside that ingested window rather than an exact ms:
+        # Druid floors __time to queryGranularity (MINUTE here), so all 50
+        # events truncate to BASE_MS — MAX(__time) is the floored minute,
+        # not the last raw event. The point is it resolved to real data
+        # time, not now().
         refined = kinesis_state["refined_offset_map"]
+        n = kinesis_state["n"]
         assert refined.watermark_estimated is False
-        assert refined.watermark_ms == kinesis_state["expected_max_ms"]
-        # And it's an earlier, real data time — not the ~now() estimate.
+        assert BASE_MS <= refined.watermark_ms <= BASE_MS + n * 1_000
+        # And it's far below the ~now() estimate it replaced.
         assert refined.watermark_ms < kinesis_state["offset_map"].watermark_ms
