@@ -55,6 +55,7 @@ from migrator.realtime.hybrid_planner import (
 )
 from migrator.realtime.models import StreamOffsetMap
 from migrator.realtime.offset_io import load_offset_map, save_offset_map
+from migrator.realtime.watermark import refine_watermark
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,11 +267,27 @@ def run_cutover(
     if _step("extract_offsets"):
         try:
             offset_map = overlord.get_supervisor_offsets(cfg.supervisor_id)
+            # When the watermark was estimated (now() fallback — e.g. a
+            # Kinesis supervisor, whose report carries no timestamp),
+            # refine it to MAX(__time) of the datasource. A now()-watermark
+            # risks data loss at cutover if the supervisor is lagging.
+            refined_note = ""
+            if offset_map.watermark_estimated and druid_sql_client is not None:
+                refined = refine_watermark(
+                    offset_map, druid_sql_query=druid_sql_client.query,
+                )
+                if not refined.watermark_estimated:
+                    refined_note = " (refined from MAX(__time))"
+                offset_map = refined
             offsets_path = cfg.out_dir / "offsets.json"
             save_offset_map(offset_map, offsets_path)
+            estimated_note = (
+                " [ESTIMATED now()-fallback — verify or pass --watermark-iso]"
+                if offset_map.watermark_estimated else refined_note
+            )
             _record(
                 "extract_offsets", "ok",
-                detail=f"watermark={offset_map.watermark_iso}",
+                detail=f"watermark={offset_map.watermark_iso}{estimated_note}",
                 artifact=str(offsets_path),
             )
         except Exception as exc:  # noqa: BLE001

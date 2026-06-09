@@ -165,7 +165,7 @@ class DruidOverlordClient:
         payload = status.get("payload") or {}
         spec = self._try_get_supervisor_spec(supervisor_id)
         datasource = payload.get("dataSource") or supervisor_id
-        watermark_ms, watermark_iso = _resolve_watermark(payload)
+        watermark_ms, watermark_iso, watermark_estimated = _resolve_watermark(payload)
 
         positions: dict = (
             payload.get("latestOffsets")
@@ -220,6 +220,7 @@ class DruidOverlordClient:
                 datasource=datasource,
                 watermark_iso=watermark_iso,
                 watermark_ms=watermark_ms,
+                watermark_estimated=watermark_estimated,
                 shard_sequences=sorted(
                     shard_sequences, key=lambda s: s.shard_id
                 ),
@@ -252,6 +253,7 @@ class DruidOverlordClient:
             datasource=datasource,
             watermark_iso=watermark_iso,
             watermark_ms=watermark_ms,
+            watermark_estimated=watermark_estimated,
             offsets=sorted(partition_offsets, key=lambda po: po.partition),
         )
 
@@ -395,8 +397,16 @@ def _detect_platform(
     return StreamPlatform.KAFKA
 
 
-def _resolve_watermark(payload: dict) -> tuple[int, str]:
-    """Return ``(epoch_ms, iso8601)`` for the watermark."""
+def _resolve_watermark(payload: dict) -> tuple[int, str, bool]:
+    """Return ``(epoch_ms, iso8601, estimated)`` for the watermark.
+
+    ``estimated`` is True only when no precise timestamp was found in the
+    payload and we fell back to ``now()`` — the caller flags the
+    ``StreamOffsetMap`` so the cutover can refine it from the datasource's
+    ``MAX(__time)`` (see ``migrator.realtime.watermark.refine_watermark``).
+    Kinesis supervisor reports carry no absolute timestamp, so they take
+    this path; Kafka reports a precise ``lastIngestedTimestamp``.
+    """
     candidates = [
         payload.get("lastIngestedTimestamp"),
         _safe_get(payload, ["aggregateLag", "timestamp"]),
@@ -410,17 +420,18 @@ def _resolve_watermark(payload: dict) -> tuple[int, str]:
                 ts_ms = int(cand)
                 return ts_ms, _to_pinot_iso(
                     datetime.fromtimestamp(ts_ms / 1000, timezone.utc)
-                )
+                ), False
             if isinstance(cand, str):
                 # Druid usually emits ISO-8601 with 'Z'
                 dt = datetime.fromisoformat(cand.replace("Z", "+00:00"))
                 ts_ms = int(dt.timestamp() * 1000)
-                return ts_ms, _to_pinot_iso(dt.astimezone(timezone.utc))
+                return ts_ms, _to_pinot_iso(dt.astimezone(timezone.utc)), False
         except (TypeError, ValueError):
             continue
-    # Fallback: now() — operator should override via --watermark-iso
+    # Fallback: now() — imprecise. Flagged estimated so the cutover can
+    # refine it to MAX(__time); operator can also override manually.
     now = datetime.now(timezone.utc)
-    return int(now.timestamp() * 1000), _to_pinot_iso(now)
+    return int(now.timestamp() * 1000), _to_pinot_iso(now), True
 
 
 def _to_pinot_iso(dt: datetime) -> str:
