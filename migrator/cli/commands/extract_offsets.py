@@ -99,3 +99,14 @@ def command(
             f"'{supervisor_id}' to {out} "
             f"(watermark={offset_map.watermark_iso}, {positions})"
         )
+        if offset_map.watermark_estimated:
+            typer.echo(
+                "WARNING: the watermark is ESTIMATED (the supervisor report "
+                "carried no precise timestamp, so it fell back to now()). "
+                "This risks data loss at cutover if the supervisor is "
+                "lagging. `dpm cutover` refines it from MAX(__time) "
+                "automatically; for a standalone offsets file, verify the "
+                "boundary or set the watermark to the datasource's "
+                "MAX(__time) before planning.",
+                err=True,
+            )

@@ -53,6 +53,7 @@ import pytest
 from migrator.druid.overlord_client import DruidOverlordClient
 from migrator.realtime.hybrid_planner import plan_hybrid_migration
 from migrator.realtime.models import StreamPlatform
+from migrator.realtime.watermark import refine_watermark
 from tests.docker.cluster_clients import (
     DRUID_ROUTER_URL,
     LOCALSTACK_KINESIS_INTERNAL,
@@ -121,6 +122,13 @@ def kinesis_state(
         offset_map = overlord.get_supervisor_offsets(sup_id)
     positions_populated = bool(offset_map.shard_sequences)
 
+    # The Kinesis watermark is estimated (now()-fallback — no timestamp in
+    # the supervisor report). Refine it from the datasource's MAX(__time),
+    # exactly as `dpm cutover` does. DruidClient.sql_query is the SQL
+    # callable.
+    refined_offset_map = refine_watermark(offset_map, druid_sql_query=druid.sql_query)
+    expected_max_ms = BASE_MS + (N - 1) * 1_000
+
     # 4) Terminate (simulate cutover)
     supervisor_client.terminate_supervisor(sup_id)
 
@@ -151,6 +159,8 @@ def kinesis_state(
         "plan": plan,
         "n": N,
         "positions_populated": positions_populated,
+        "refined_offset_map": refined_offset_map,
+        "expected_max_ms": expected_max_ms,
     }
 
     supervisor_client.terminate_supervisor(sup_id)
@@ -213,3 +223,18 @@ class TestKinesisRealtimeMigration:
         )
         # No Kafka keys leak into a Kinesis hybrid plan.
         assert not any(k.startswith("stream.kafka.") for k in sc)
+
+    def test_raw_kinesis_watermark_is_estimated(self, kinesis_state):
+        # The Kinesis supervisor report has no absolute timestamp, so the
+        # raw captured watermark is the now()-fallback — flagged estimated.
+        assert kinesis_state["offset_map"].watermark_estimated is True
+
+    def test_watermark_refines_to_max_event_time(self, kinesis_state):
+        # refine_watermark replaces the estimated now()-watermark with the
+        # datasource's MAX(__time) — the precise cutover boundary. Our 50
+        # events run BASE_MS .. BASE_MS+49s, so MAX(__time) is the last one.
+        refined = kinesis_state["refined_offset_map"]
+        assert refined.watermark_estimated is False
+        assert refined.watermark_ms == kinesis_state["expected_max_ms"]
+        # And it's an earlier, real data time — not the ~now() estimate.
+        assert refined.watermark_ms < kinesis_state["offset_map"].watermark_ms

@@ -202,6 +202,22 @@ class TestGetSupervisorOffsets:
         # No timestamp in payload, fallback to "now"
         assert m.watermark_ms > 0
         assert "T" in m.watermark_iso
+        # ...and it's flagged estimated so the cutover refines it.
+        assert m.watermark_estimated is True
+
+    def test_watermark_not_estimated_when_timestamp_present(self, overlord_url):
+        session = _MockSession({
+            f"{overlord_url}/druid/indexer/v1/supervisor/s/status":
+                _Resp(200, {"payload": {
+                    "topic": "t", "dataSource": "d",
+                    "latestOffsets": {"0": 1},
+                    "lastIngestedTimestamp": "2024-03-01T00:00:00.000Z",
+                }}),
+        })
+        client = DruidOverlordClient(overlord_url, session=session)
+        m = client.get_supervisor_offsets("s")
+        assert m.watermark_estimated is False
+        assert m.watermark_iso.startswith("2024-03-01")
 
     def test_watermark_iso_uses_pinot_compatible_format(self, overlord_url):
         # Pinot's TIMESTAMP offset criterion uses Java Instant.parse, which

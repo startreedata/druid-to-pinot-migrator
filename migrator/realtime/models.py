@@ -119,6 +119,21 @@ class StreamOffsetMap(BaseModel):
         ge=0,
         description="Same as watermark_iso, expressed as epoch milliseconds.",
     )
+    watermark_estimated: bool = Field(
+        default=False,
+        description=(
+            "True when the watermark could not be read from a precise "
+            "timestamp in the supervisor status (e.g. Kinesis, whose "
+            "report carries no absolute timestamp) and fell back to "
+            "capture-time now(). A now()-watermark risks data loss at "
+            "cutover if the supervisor is lagging — Pinot would start "
+            "consuming AFTER events Druid hadn't yet ingested. Refine it "
+            "to MAX(__time) of the datasource via "
+            "``migrator.realtime.watermark.refine_watermark`` (the cutover "
+            "orchestrator does this automatically when a Druid SQL client "
+            "is available)."
+        ),
+    )
     offsets: list[KafkaPartitionOffset] = Field(
         default_factory=list,
         description="Kafka per-partition offsets (empty for Kinesis sources).",
