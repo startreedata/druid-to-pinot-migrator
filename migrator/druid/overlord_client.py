@@ -177,6 +177,16 @@ class DruidOverlordClient:
                 "Unexpected supervisor status shape: latestOffsets is "
                 f"{type(positions).__name__}, expected dict"
             )
+        # The supervisor-level ``latestOffsets`` is computed lazily (a
+        # periodic stream-head query) and is often absent on a freshly
+        # started supervisor — especially for Kinesis, where it can stay
+        # null for minutes. Fall back to the positions the tasks have
+        # actually consumed, reported under ``activeTasks[].currentOffsets``
+        # (and ``publishingTasks`` for a task mid-handoff). These are the
+        # more accurate cutover boundary anyway: what Druid has consumed,
+        # not the stream head.
+        if not positions:
+            positions = _positions_from_tasks(payload)
 
         platform = _detect_platform(spec, payload, positions)
 
@@ -285,6 +295,53 @@ def _safe_get(d: dict, path: list[str]) -> Any:
             return None
         cur = cur[k]
     return cur
+
+
+def _positions_from_tasks(payload: dict) -> dict:
+    """Merge per-partition/shard positions from the supervisor's task
+    reports, used when the supervisor-level ``latestOffsets`` is absent.
+
+    Each entry of ``activeTasks`` / ``publishingTasks`` is a
+    ``TaskReportData`` carrying ``currentOffsets`` (the positions that
+    task has consumed) keyed by partition id / shard id. We merge across
+    all tasks, preferring the highest value seen for a key so a task
+    mid-handoff (in ``publishingTasks``) doesn't regress a position.
+
+    Both maps hold the same value type the supervisor-level map would:
+    integers for Kafka, opaque sequence strings for Kinesis. Keys don't
+    overlap across tasks in practice (each task owns a disjoint set of
+    partitions/shards), so the per-key comparison is only a tie-break
+    safeguard for the brief window where a handing-off ``publishingTask``
+    and a new ``activeTask`` both report the same partition — there we
+    keep the furthest-consumed (largest) position.
+    """
+    def _gt(a, b) -> bool:
+        # Kafka offsets are ints; Kinesis sequence numbers are long
+        # all-digit strings — both compare correctly numerically.
+        # Lexicographic comparison would be wrong for ints ("100" < "99").
+        try:
+            return int(a) > int(b)
+        except (TypeError, ValueError):
+            return str(a) > str(b)
+
+    merged: dict = {}
+    for key in ("activeTasks", "publishingTasks"):
+        tasks = payload.get(key) or []
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            current = task.get("currentOffsets") or {}
+            if not isinstance(current, dict):
+                continue
+            for pid, val in current.items():
+                if val is None or str(val) == "":
+                    continue
+                existing = merged.get(pid)
+                if existing is None or _gt(val, existing):
+                    merged[pid] = val
+    return merged
 
 
 def _detect_platform(

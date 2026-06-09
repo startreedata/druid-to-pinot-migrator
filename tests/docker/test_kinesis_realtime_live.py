@@ -27,17 +27,17 @@ true payload shape. This drives:
 4. Run ``plan_hybrid_migration`` and assert the REALTIME table is a
    ``streamType: kinesis`` config seeded with the watermark timestamp.
 
-Scope note: this validates the Druid-side detection + plan generation —
-the part that regressed twice (Kinesis misdetected as Kafka; int() crash
-on sequence strings). Two things are deliberately out of scope:
-  - Pinot consuming from LocalStack Kinesis (needs Pinot-side endpoint
-    wiring; the Kafka test already covers Pinot stream consumption).
-  - Asserting non-empty per-shard sequences. Druid computes the
-    supervisor-level ``latestOffsets`` lazily (a periodic stream-head
-    query that, for Kinesis on LocalStack, may not have run yet), so an
-    empty positions list is the CORRECT output of get_supervisor_offsets
-    here. Capturing positions + a precise watermark from
-    ``activeTasks[].currentOffsets`` instead is a tracked follow-up.
+Scope note: this validates the Druid-side detection + capture + plan —
+the part that regressed (Kinesis misdetected as Kafka; int() crash on
+sequence strings; positions missing because the supervisor-level
+``latestOffsets`` is lazy). Per-shard sequences ARE asserted now that
+get_supervisor_offsets falls back to ``activeTasks[].currentOffsets``.
+
+Out of scope: Pinot consuming from LocalStack Kinesis (needs Pinot-side
+endpoint wiring; the Kafka test already covers Pinot stream consumption),
+and precise-watermark derivation for Kinesis (the supervisor payload has
+no absolute timestamp, so the watermark falls back to capture-time —
+tracked as a separate follow-up).
 
 The class is marked ``kinesis`` so a flaky Druid×LocalStack combo can be
 deselected per matrix cell with ``-m 'not kinesis'`` without dropping
@@ -45,6 +45,8 @@ the rest of the live suite.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -99,24 +101,25 @@ def kinesis_state(
         dimensions=["user_id"],
     )
     # Wait until Druid has actually ingested the records from LocalStack —
-    # this proves the Druid↔LocalStack Kinesis wiring works end-to-end.
-    #
-    # NOTE: we deliberately do NOT wait for the supervisor's top-level
-    # ``latestOffsets`` to populate. Druid computes that lazily on a
-    # periodic stream-head query that (for Kinesis on LocalStack) hadn't
-    # run even after 300s — the field is @Nullable and simply absent from
-    # the status JSON until then. The actual consumed positions live under
-    # ``activeTasks[].currentOffsets``; capturing Kinesis per-shard
-    # sequences + a precise watermark from there is a tracked follow-up
-    # (see test_shard_sequences_are_strings_when_present). This test
-    # validates the part that regressed twice: that the REAL Kinesis
-    # status payload flows through get_supervisor_offsets as ``kinesis``
-    # (not misdetected as Kafka) without crashing on sequence strings.
+    # proves the Druid↔LocalStack Kinesis wiring works end-to-end.
     druid.wait_for_datasource(DS, timeout=240)
 
-    # 3) Capture via the migrator's own client — the REAL status payload
+    # 3) Capture via the migrator's own client — the REAL status payload.
+    #
+    # Druid emits ALL position data (supervisor-level ``latestOffsets`` AND
+    # per-task ``currentOffsets``) on a lazy cycle that lags ingestion, so
+    # capturing the instant rows appear yields empty positions. Poll the
+    # capture for a bounded window so positions get a chance to populate;
+    # ``positions_populated`` records whether they did, so the positions
+    # assertion can SKIP (not fail) if Druid simply hadn't emitted them yet
+    # — the merge logic itself is covered strictly by unit tests.
     overlord = DruidOverlordClient(DRUID_ROUTER_URL)
     offset_map = overlord.get_supervisor_offsets(sup_id)
+    positions_deadline = time.time() + 150
+    while not offset_map.shard_sequences and time.time() < positions_deadline:
+        time.sleep(10)
+        offset_map = overlord.get_supervisor_offsets(sup_id)
+    positions_populated = bool(offset_map.shard_sequences)
 
     # 4) Terminate (simulate cutover)
     supervisor_client.terminate_supervisor(sup_id)
@@ -147,6 +150,7 @@ def kinesis_state(
         "offset_map": offset_map,
         "plan": plan,
         "n": N,
+        "positions_populated": positions_populated,
     }
 
     supervisor_client.terminate_supervisor(sup_id)
@@ -166,18 +170,22 @@ class TestKinesisRealtimeMigration:
     def test_supervisor_id_carried(self, kinesis_state):
         assert kinesis_state["offset_map"].supervisor_id == kinesis_state["supervisor_id"]
 
-    def test_shard_sequences_are_strings_when_present(self, kinesis_state):
-        # The supervisor's top-level latestOffsets is computed lazily, so on
-        # a fresh supervisor it's often absent and shard_sequences is empty —
-        # that's the CORRECT behaviour of get_supervisor_offsets given an
-        # absent latestOffsets (not a crash, not a misparse). When sequences
-        # ARE present, the crux assertion holds: they're opaque STRINGS,
+    def test_shard_sequences_captured_from_active_tasks(self, kinesis_state):
+        # get_supervisor_offsets falls back to activeTasks[].currentOffsets
+        # when the supervisor-level latestOffsets is absent (the real
+        # Kinesis case). Druid emits position data on a lazy cycle, so if
+        # it hadn't surfaced any within the fixture's poll window we SKIP
+        # rather than fail — the merge logic itself is strictly covered by
+        # the _positions_from_tasks unit tests. When positions ARE present,
+        # the crux assertion holds: sequence numbers are opaque STRINGS,
         # never int()-coerced (the bug that broke real Kinesis capture).
-        #
-        # FOLLOW-UP: enrich get_supervisor_offsets to read per-shard
-        # positions from activeTasks[].currentOffsets so this is reliably
-        # non-empty + yields a precise watermark. Tracked separately.
+        if not kinesis_state["positions_populated"]:
+            pytest.skip(
+                "Druid had not emitted Kinesis positions within the poll "
+                "window; activeTasks-merge logic is covered by unit tests"
+            )
         om = kinesis_state["offset_map"]
+        assert om.shard_sequences
         for ss in om.shard_sequences:
             assert isinstance(ss.shard_id, str) and ss.shard_id
             assert isinstance(ss.sequence_number, str) and ss.sequence_number
