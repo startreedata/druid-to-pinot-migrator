@@ -42,7 +42,7 @@ jobs:
       PINOT_VERSION: ${{ inputs.pinot_version }}
       LIVE_DOCKER_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Free disk space
         run: |
