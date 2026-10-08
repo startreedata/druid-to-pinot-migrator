@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload coverage artifacts
         if: matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-${{ github.event_name }}-${{ github.run_id }}
           path: |
