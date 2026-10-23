@@ -1,0 +1,71 @@
+# Locally-built MinIO server image for the live Docker integration stack.
+#
+# Why this exists
+# ───────────────
+# MinIO narrowed its community image distribution in 2025: the pinned
+# `minio/minio:RELEASE.2025-04-22T22-12-26Z` tag is no longer anonymously
+# pullable from Docker Hub (the anonymous token's `access` grant is empty →
+# HTTP 401 on the manifest). See issue #69. Because `pinot-controller`
+# depends on the MinIO bucket-init job, a failed pull takes down
+# `docker compose up --wait` for the WHOLE stack, not just the single S3
+# URI-sink test that actually uses MinIO.
+#
+# Rather than drop the required S3 coverage (the s3:// URI-sink test must
+# keep PASSING), we rebuild the exact pinned release from MinIO's official,
+# publicly-readable source at its tagged commit. The result is functionally
+# equivalent for our use (server + bucket create) and distributed to nobody —
+# it is built fresh in-stack / in-CI and never pushed to a registry.
+#
+# Pinned source
+# ─────────────
+#   minio/minio  RELEASE.2025-04-22T22-12-26Z
+#   commit       0d7408fc9969caf07de6a8c3a84f9fbb10a6739e
+#
+# The commit is the immutable identity; the release tag is only baked into
+# the version string via ldflags (purely cosmetic for our use).
+
+# ── Build stage: compile the minio binary from pinned source ──────────────
+# go.mod at this commit requires `go 1.24.0` with `toolchain go1.24.2`.
+# golang:1.24-bookworm ships a 1.24.x >= 1.24.2, so GOTOOLCHAIN=local keeps
+# the build deterministic and offline (no mid-build toolchain download).
+FROM golang:1.24-bookworm AS build
+ENV GOTOOLCHAIN=local
+
+ARG MINIO_COMMIT=0d7408fc9969caf07de6a8c3a84f9fbb10a6739e
+ARG MINIO_RELEASE=RELEASE.2025-04-22T22-12-26Z
+
+WORKDIR /src
+# --checksum verifies the fetched archive against the pinned SHA256. The
+# commit SHA is the immutable source identity; the checksum additionally
+# catches a corrupted/tampered download. (If GitHub ever regenerates the
+# codeload archive with different compression the hash will change and the
+# build will fail loudly — recompute with:
+#   curl -sSL https://github.com/minio/minio/archive/<commit>.tar.gz | sha256sum)
+ADD --checksum=sha256:7eb30a913fea30f18069abf194e1e78e4983b558cc526911ae1c11396a9859a5 \
+    https://github.com/minio/minio/archive/${MINIO_COMMIT}.tar.gz /tmp/minio.tar.gz
+RUN tar -xzf /tmp/minio.tar.gz --strip-components=1 -C /src && rm /tmp/minio.tar.gz
+
+# Mirror the upstream Makefile `build` target (CGO off, -tags kqueue,
+# -trimpath) and set the same ldflags the release build would, so the
+# embedded version matches the pinned release instead of DEVELOPMENT.GOGET.
+RUN CGO_ENABLED=0 go build -tags kqueue -trimpath \
+      -ldflags "-s -w \
+        -X github.com/minio/minio/cmd.Version=${MINIO_RELEASE} \
+        -X github.com/minio/minio/cmd.ReleaseTag=${MINIO_RELEASE} \
+        -X github.com/minio/minio/cmd.CommitID=${MINIO_COMMIT}" \
+      -o /out/minio .
+
+# ── Runtime stage: slim Debian with /bin/sh + curl for the healthcheck ────
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/minio /usr/bin/minio
+
+VOLUME ["/data"]
+EXPOSE 9000 9001
+
+# The compose service supplies `server /data --console-address :9001`.
+ENTRYPOINT ["/usr/bin/minio"]

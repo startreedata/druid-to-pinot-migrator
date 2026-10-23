@@ -105,8 +105,13 @@ def docker_stack():
             )
         return proc
 
-    # Bring up the whole stack (images are expected to be present locally)
-    run(["up", "-d", "--wait", "--wait-timeout", "420"])
+    # Bring up the whole stack. Pulled images (druid/pinot/kafka/...) are
+    # expected to be present locally; the two locally-built MinIO images
+    # (minio, minio-init) are built on demand. ``--build`` makes compose
+    # rebuild them when their Dockerfile/context changed instead of silently
+    # reusing a stale ``dpm-local/*`` tag — a cache hit is a near-no-op when
+    # nothing changed, so this is cheap for the common case.
+    run(["up", "-d", "--build", "--wait", "--wait-timeout", "420"])
 
     yield  # tests run here
 

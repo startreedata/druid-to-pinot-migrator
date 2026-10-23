@@ -70,6 +70,14 @@ jobs:
           docker pull "apache/druid:${DRUID_VERSION}"
           docker pull "apachepinot/pinot:${PINOT_VERSION}"
 
+      - name: Build local MinIO images
+        # MinIO's pinned Docker Hub images are no longer anonymously pullable
+        # (issue #69), so the stack builds them from MinIO's official pinned
+        # source instead. Build them here as an explicit, diagnosable step —
+        # the S3 URI-sink live test is required and must run (not skip).
+        run: |
+          docker compose -f tests/docker/docker-compose.yml build minio minio-init
+
       # ── No-auth: full live migration suite ────────────────────────────
       - name: Live integration suite (no-auth)
         # Pinot's ingestFromFile API is async — segments may take 60-300s to
