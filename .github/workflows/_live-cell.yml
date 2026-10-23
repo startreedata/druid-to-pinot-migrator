@@ -100,7 +100,7 @@ jobs:
           docker ps -a
           echo
           for container in migtest-coordinator migtest-pinot-controller \
-                           migtest-pinot-server migtest-minio migtest-minio-init \
+                           migtest-pinot-server migtest-minio \
                            authtest-coordinator authtest-pinot-controller \
                            authtest-pinot-broker; do
             if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then

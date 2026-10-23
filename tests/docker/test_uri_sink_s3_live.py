@@ -9,10 +9,12 @@ deployments rarely have a shared filesystem and rely on object storage.
 
 Stack
 ─────
-The docker-compose adds a ``minio`` service (S3-compatible) and a
-one-shot ``minio-init`` job that creates the ``dpm-test`` bucket.
-``pinot-controller.conf`` registers the ``S3PinotFS`` factory pointed
-at the in-network MinIO endpoint (path-style, ACLs disabled).
+The docker-compose adds a profile-gated ``minio`` service (S3-compatible);
+the ``dpm-test`` bucket is created by this test's own ``s3_client``
+fixture. ``pinot-controller.conf`` registers the ``S3PinotFS`` factory
+pointed at the in-network MinIO endpoint (path-style, ACLs disabled).
+MinIO's public image is no longer anonymously pullable, so this test
+skips when the MinIO endpoint is unreachable.
 
 What this test covers that the file:// test does not
 ─────────────────────────────────────────────────────
@@ -64,10 +66,10 @@ MINIO_ACCESS_KEY = "minioadmin"
 MINIO_SECRET_KEY = "minioadmin"
 BUCKET = "dpm-test"
 
-# In-network endpoint that the Pinot controller uses (declared in
-# pinot-controller.conf). Different from the host URL because the
-# controller resolves "minio" via the docker network, not the host port
-# mapping.
+# The s3:// key prefix the sink emits. The controller fetches it via its
+# in-network MinIO endpoint (http://minio:9000, declared in
+# pinot-controller.conf) — not the host URL above, because the controller
+# resolves "minio" over the docker network rather than the host port map.
 URI_PREFIX = f"s3://{BUCKET}/uri-sink-s3"
 
 
@@ -78,14 +80,36 @@ URI_PREFIX = f"s3://{BUCKET}/uri-sink-s3"
 
 @pytest.fixture(scope="module")
 def s3_client(docker_stack):
-    """A boto3 S3 client pointed at the host-mapped MinIO."""
-    return boto3.client(
+    """A boto3 S3 client pointed at the host-mapped MinIO.
+
+    MinIO is profile-gated in docker-compose.yml (its public Docker Hub
+    image is no longer anonymously pullable); the ``docker_stack`` fixture
+    brings the ``s3`` profile up best-effort after the core stack. We probe
+    the endpoint and skip the whole module when MinIO is unreachable rather
+    than failing — the rest of the live suite does not depend on it. We also
+    create the ``dpm-test`` bucket here (previously a separate ``minio-init``
+    container did this, but it needed a second unpullable image).
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    client = boto3.client(
         "s3",
         endpoint_url=MINIO_HOST_URL,
         aws_access_key_id=MINIO_ACCESS_KEY,
         aws_secret_access_key=MINIO_SECRET_KEY,
         region_name="us-east-1",
     )
+    try:
+        existing = {b["Name"] for b in client.list_buckets().get("Buckets", [])}
+        if BUCKET not in existing:
+            client.create_bucket(Bucket=BUCKET)
+    except (BotoCoreError, ClientError, OSError) as exc:
+        pytest.skip(
+            f"MinIO not reachable at {MINIO_HOST_URL} "
+            f"(its image is likely unavailable; the s3 profile is brought up "
+            f"best-effort by the docker_stack fixture): {exc}"
+        )
+    return client
 
 
 @pytest.fixture

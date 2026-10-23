@@ -105,13 +105,34 @@ def docker_stack():
             )
         return proc
 
-    # Bring up the whole stack (images are expected to be present locally)
+    # Bring up the core stack (images are expected to be present locally).
+    # MinIO is NOT in the default profile — see docker-compose.yml — because
+    # its public images are no longer anonymously pullable and a failed pull
+    # would otherwise take down the whole stack.
     run(["up", "-d", "--wait", "--wait-timeout", "420"])
+
+    # Best-effort: bring up the S3 (MinIO) profile so the s3:// URI-sink test
+    # runs wherever the MinIO images are available. If the images can't be
+    # pulled/started, we log and continue — test_uri_sink_s3_live.py detects
+    # the missing endpoint and skips itself rather than failing the suite.
+    s3 = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file),
+         "--profile", "s3", "up", "-d", "--wait", "--wait-timeout", "180"],
+        cwd=str(DOCKER_DIR), check=False, capture_output=True, text=True,
+    )
+    if s3.returncode != 0:
+        sys.stderr.write(
+            "\n[docker compose --profile s3 up] non-zero exit "
+            f"({s3.returncode}); the s3:// URI-sink test will skip.\n"
+            f"--- stderr ---\n{s3.stderr}\n"
+        )
+        sys.stderr.flush()
 
     yield  # tests run here
 
-    # Always tear down, even if tests fail
-    run(["down", "-v", "--remove-orphans"])
+    # Always tear down, even if tests fail. `down` removes containers for
+    # profile-gated services too, so this covers MinIO when it was started.
+    run(["--profile", "s3", "down", "-v", "--remove-orphans"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

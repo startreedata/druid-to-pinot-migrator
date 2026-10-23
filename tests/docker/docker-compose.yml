@@ -236,9 +236,16 @@ services:
       start_period: 60s
 
   # ── MinIO (S3-compatible blob store for the URI-sink integration test) ───
+  # Profile-gated: MinIO's public Docker Hub image (minio/minio) is no
+  # longer anonymously pullable, so leaving it in the default set breaks
+  # `docker compose up --wait` for the whole stack. It starts only under the
+  # `s3` profile (the conftest `docker_stack` fixture brings this up
+  # best-effort after the core stack). When the image is unavailable the
+  # S3 URI-sink test skips itself. See test_uri_sink_s3_live.py.
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: migtest-minio
+    profiles: ["s3"]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -257,24 +264,10 @@ services:
       retries: 12
       start_period: 30s
 
-  # ── MinIO bucket bootstrap ───────────────────────────────────────────────
-  # One-shot init container: creates the test bucket via the mc CLI and
-  # exits. Must run before pinot-controller starts so the controller's
-  # ingestFromURI calls find an existing bucket.
-  minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
-    container_name: migtest-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb -p local/dpm-test &&
-      echo 'bucket dpm-test ready'
-      "
-    networks:
-      - migtest
+  # The `dpm-test` bucket is created by the S3 URI-sink test's own fixture
+  # (tests/docker/test_uri_sink_s3_live.py), so there is no separate
+  # `minio-init` / `mc` container — that avoids a second unpullable MinIO
+  # image (minio/mc) and keeps bucket bootstrap in one place.
 
   # ── Pinot Controller ──────────────────────────────────────────────────────
   pinot-controller:
@@ -283,10 +276,12 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
-      minio-init:
-        # Wait for the bucket to exist before the controller comes up,
-        # otherwise an early ingestFromURI hits a NoSuchBucket error.
-        condition: service_completed_successfully
+    # NOTE: the controller intentionally does NOT depend on MinIO. The
+    # S3PinotFS factory below is registered lazily — the controller boots
+    # fine whether or not MinIO is up — so gating the whole stack on the
+    # optional, profile-gated `minio` service would be a single point of
+    # failure. The S3 URI-sink test creates its own bucket and skips itself
+    # when MinIO is unreachable.
     ports:
       - "19000:9000"
     environment:
