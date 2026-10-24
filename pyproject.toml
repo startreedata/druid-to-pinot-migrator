@@ -38,6 +38,7 @@ dependencies = [
     "pyyaml>=6.0",
     "jinja2>=3.0",
     "rich>=13.0",
+    "requests>=2.31",
     # MSQ ingestion specs are SQL strings; sqlglot parses them
     # safely (multi-line, comments, quoted identifiers) without
     # us reinventing a SQL parser. Single-file pure-Python dep.
@@ -56,7 +57,6 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-timeout>=2.0",
     "pytest-rerunfailures>=14.0",
-    "requests>=2.31",
     "kafka-python>=2.0",
     # Used only by the live S3 URI-sink test (tests/docker/test_uri_sink_s3_live.py)
     # to upload fixture data into a MinIO bucket. Keep it dev-only — production
